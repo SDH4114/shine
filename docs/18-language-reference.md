@@ -5,7 +5,7 @@
 - имя: Shine;
 - расширение: `.shn`;
 - CLI: `shine`;
-- версия документации: 0.2.0;
+- версия документации: 0.1.3;
 - реализация: Rust stable;
 - backend: tree-walking evaluator.
 
@@ -16,6 +16,8 @@
 | `fn` | функция |
 | `import`, `from`, `as` | импорт модуля или имени |
 | `export` | открыть top-level имя другим модулям |
+| `class` | простой класс |
+| `private` | закрытое поле или метод класса |
 | `const` | константа |
 | `if` | условие |
 | `else` | альтернативная ветка |
@@ -77,13 +79,22 @@ export fn calculate() { return square(2) }
 name = expression
 name: Type = expression
 const name = expression
-const name: Type = expression
 name += expression
 name -= expression
 name *= expression
 name /= expression
+object.field = expression
 list[index] = expression
 [a, b] = expression
+```
+
+```shine
+class Name {
+    field = value
+    private secret = value
+    fn init(argument) { self.field = argument }
+    fn method() { return self.field }
+}
 ```
 
 ```shine
@@ -128,6 +139,8 @@ not  and  or  in
 ```shine
 function(arguments)
 list.method(arguments)
+object.field
+object.method(arguments)
 value[index]
 value[start..end]
 value[..end]
@@ -137,7 +150,7 @@ value[start..]
 ## Встроенные константы
 
 ```text
-PI  E  INF  NAN
+PI  TAU  E  PHI  INF  NAN
 ```
 
 ## Глобальные функции
@@ -169,10 +182,21 @@ abs(x)
 round(x, digits?)
 floor(x)
 ceil(x)
+trunc(x)
+fract(x)
 pow(base, exponent)
+exp(x)
+exp2(x)
+cbrt(x)
 min(value, ...)
 max(value, ...)
 sum(list)
+product(list)
+mean(list)
+median(list)
+mode(list)
+variance(list)
+std(list)
 sqrt(x)
 sin(x)
 cos(x)
@@ -180,9 +204,27 @@ tan(x)
 asin(x)
 acos(x)
 atan(x)
+atan2(y, x)
+sinh(x)
+cosh(x)
+tanh(x)
+asinh(x)
+acosh(x)
+atanh(x)
 log(x)
 log10(x)
 log2(x)
+degrees(x)
+radians(x)
+hypot(x, y)
+clamp(value, minimum, maximum)
+sign(x)
+gcd(a, b)
+lcm(a, b)
+factorial(x)
+isNan(x)
+isInfinite(x)
+isFinite(x)
 ```
 
 ## Методы List
@@ -203,6 +245,11 @@ sum()
 min()
 max()
 mean()
+product()
+median()
+mode()
+variance()
+std()
 ```
 
 ## Области видимости

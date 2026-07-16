@@ -94,6 +94,7 @@ impl<'a> Parser<'a> {
     fn exported_name(&self, statement: &Stmt) -> Result<String, Diagnostic> {
         match statement {
             Stmt::Function { name, .. }
+            | Stmt::Class { name, .. }
             | Stmt::Assign {
                 target: AssignTarget::Name(name, _),
                 ..
@@ -125,6 +126,9 @@ impl<'a> Parser<'a> {
     fn statement(&mut self) -> Result<Stmt, Diagnostic> {
         if self.take(&TokenKind::Fn).is_some() {
             return self.function();
+        }
+        if self.take(&TokenKind::Class).is_some() {
+            return self.class_statement();
         }
         if self.take(&TokenKind::If).is_some() {
             return self.if_statement();
@@ -197,6 +201,92 @@ impl<'a> Parser<'a> {
             span: start.merge(body.span),
             body,
         })
+    }
+
+    fn class_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.previous().span;
+        let (name, _) = self.identifier("expected a class name")?;
+        self.expect(&TokenKind::LeftBrace, "expected `{` after the class name")?;
+        self.separators();
+        let mut members = vec![];
+        while !self.at(&TokenKind::RightBrace) && !self.at(&TokenKind::Eof) {
+            let private = self.take(&TokenKind::Private).is_some();
+            if self.take(&TokenKind::Fn).is_some() {
+                members.push(self.class_method(private)?);
+            } else {
+                members.push(self.class_field(private)?);
+            }
+            self.end_statement()?;
+        }
+        let close = self
+            .expect(&TokenKind::RightBrace, "expected `}` after the class body")?
+            .span;
+        Ok(Stmt::Class {
+            name,
+            members,
+            span: start.merge(close),
+        })
+    }
+
+    fn class_method(&mut self, private: bool) -> Result<ClassMember, Diagnostic> {
+        let start = self.previous().span;
+        let (name, _) = self.identifier("expected a method name")?;
+        self.expect(&TokenKind::LeftParen, "expected `(` after the method name")?;
+        let params = self.parameters()?;
+        self.expect(&TokenKind::RightParen, "expected `)` after parameters")?;
+        let return_type = if self.take(&TokenKind::Colon).is_some() {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
+        let body = self.block()?;
+        Ok(ClassMember::Method {
+            name,
+            params,
+            return_type,
+            span: start.merge(body.span),
+            body,
+            private,
+        })
+    }
+
+    fn class_field(&mut self, private: bool) -> Result<ClassMember, Diagnostic> {
+        let (name, span) = self.identifier("expected a field or method")?;
+        if self.take(&TokenKind::Colon).is_some() {
+            return Err(self.error(
+                self.previous().span,
+                "class fields infer their type in the simple object model",
+                "Shine class fields use a default value without a separate declaration syntax.",
+                "Remove the type annotation and keep `name = value`.",
+            ));
+        }
+        self.expect(&TokenKind::Equal, "expected `=` after the field name")?;
+        let value = self.expression()?;
+        Ok(ClassMember::Field {
+            name,
+            span: span.merge(value.span()),
+            value,
+            private,
+        })
+    }
+
+    fn parameters(&mut self) -> Result<Vec<Param>, Diagnostic> {
+        let mut params = vec![];
+        if !self.at(&TokenKind::RightParen) {
+            loop {
+                let (name, span) = self.identifier("expected a parameter name")?;
+                let ty = if self.take(&TokenKind::Colon).is_some() {
+                    Some(self.type_ref()?)
+                } else {
+                    None
+                };
+                params.push(Param { name, ty, span });
+                if self.take(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(params)
     }
 
     fn if_statement(&mut self) -> Result<Stmt, Diagnostic> {
@@ -291,6 +381,18 @@ impl<'a> Parser<'a> {
 
     fn looks_like_assignment(&self) -> bool {
         if matches!(self.peek().kind, TokenKind::Identifier(_)) {
+            if self.peek_n(1).kind.same_variant(&TokenKind::Dot)
+                && matches!(self.peek_n(2).kind, TokenKind::Identifier(_))
+            {
+                return matches!(
+                    self.peek_n(3).kind,
+                    TokenKind::Equal
+                        | TokenKind::PlusEqual
+                        | TokenKind::MinusEqual
+                        | TokenKind::StarEqual
+                        | TokenKind::SlashEqual
+                );
+            }
             let mut i = 1;
             if self.peek_n(i).kind.same_variant(&TokenKind::Colon) {
                 i += 1;
@@ -338,7 +440,14 @@ impl<'a> Parser<'a> {
             AssignTarget::Destructure(names, start.merge(close))
         } else {
             let (name, name_span) = self.identifier("expected a variable name")?;
-            if self.take(&TokenKind::LeftBracket).is_some() {
+            if self.take(&TokenKind::Dot).is_some() {
+                let (member, member_span) = self.identifier("expected a field name after `.`")?;
+                AssignTarget::Member(
+                    Box::new(Expr::Name(name, name_span)),
+                    member,
+                    name_span.merge(member_span),
+                )
+            } else if self.take(&TokenKind::LeftBracket).is_some() {
                 let index = self.expression()?;
                 let close = self
                     .expect(&TokenKind::RightBracket, "expected `]` after index")?
@@ -353,6 +462,14 @@ impl<'a> Parser<'a> {
             }
         };
         let ty = if self.take(&TokenKind::Colon).is_some() {
+            if constant {
+                return Err(self.error(
+                    self.previous().span,
+                    "constants do not use type annotations",
+                    "A constant's type is inferred from its one immutable value.",
+                    "Write `const NAME = value`.",
+                ));
+            }
             Some(self.type_ref()?)
         } else {
             None
@@ -564,18 +681,26 @@ impl<'a> Parser<'a> {
                 };
             } else if self.take(&TokenKind::Dot).is_some() {
                 let (name, _) = self.identifier("expected a method name after `.`")?;
-                self.expect(&TokenKind::LeftParen, "expected `(` after method name")?;
-                let args = self.arguments()?;
-                let close = self
-                    .expect(&TokenKind::RightParen, "expected `)` after arguments")?
-                    .span;
-                let span = e.span().merge(close);
-                e = Expr::MemberCall {
-                    object: Box::new(e),
-                    name,
-                    args,
-                    span,
-                };
+                if self.take(&TokenKind::LeftParen).is_some() {
+                    let args = self.arguments()?;
+                    let close = self
+                        .expect(&TokenKind::RightParen, "expected `)` after arguments")?
+                        .span;
+                    let span = e.span().merge(close);
+                    e = Expr::MemberCall {
+                        object: Box::new(e),
+                        name,
+                        args,
+                        span,
+                    };
+                } else {
+                    let span = e.span().merge(self.previous().span);
+                    e = Expr::Member {
+                        object: Box::new(e),
+                        name,
+                        span,
+                    };
+                }
             } else if self.take(&TokenKind::LeftBracket).is_some() {
                 if self.take(&TokenKind::DotDot).is_some() {
                     let end = if self.at(&TokenKind::RightBracket) {

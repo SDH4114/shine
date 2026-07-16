@@ -1,4 +1,4 @@
-const PI: Float = 3.1415926535
+const PI = 3.1415926535
 
 fn circleArea(radius: Float): Float {
     return PI * radius ** 2

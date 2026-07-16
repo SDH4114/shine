@@ -1,0 +1,54 @@
+// Identical composite benchmark for Shine, Python, and C#.
+// Keep every workload size and formula synchronized across all three files.
+
+const ROUNDS = 2
+const INTEGER_ITERATIONS = 750_000
+const FLOAT_ITERATIONS = 150_000
+const LIST_SIZE = 100_000
+
+fn integerWork(): Int {
+    state = 1
+    checksum = 0
+    loop i in 0..INTEGER_ITERATIONS {
+        state = (state * 1_664_525 + 1_013_904_223 + i) % 2_147_483_647
+        checksum = (checksum + state) % 9_223_372_036_854_775_000
+    }
+    return checksum
+}
+
+fn floatingWork(): Float {
+    checksum = 0.0
+    loop i in 0..FLOAT_ITERATIONS {
+        x = (i + 1) * 0.00001
+        checksum += sin(x) * cos(x) + sqrt(x + 1.0) + log(x + 1.0)
+    }
+    return checksum
+}
+
+fn listWork(): Int {
+    values = []
+    state = 7
+    loop i in 0..LIST_SIZE {
+        state = (state * 48_271 + i) % 2_147_483_647
+        values.add(state)
+    }
+    values.sort()
+    middle = LIST_SIZE // 2
+    return values[0] + values[middle] + values[LIST_SIZE - 1] + values.len()
+}
+
+fn main() {
+    integerChecksum = 0
+    floatingChecksum = 0.0
+    listChecksum = 0
+
+    loop roundIndex in 0..ROUNDS {
+        integerChecksum += integerWork() + roundIndex
+        floatingChecksum += floatingWork()
+        listChecksum += listWork()
+    }
+
+    print("integer={integerChecksum}")
+    print("float={round(floatingChecksum, 6)}")
+    print("list={listChecksum}")
+}

@@ -117,7 +117,7 @@ fn main() {
 ## Полная минимальная программа
 
 ```shine
-const GREETING: String = "Hello"
+const GREETING = "Hello"
 
 fn greet(name: String): String {
     return "{GREETING}, {name}!"

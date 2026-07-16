@@ -9,7 +9,7 @@ This is the self-contained source of truth for Shine. Give it to an AI or develo
 - Name: Shine
 - Extension: .shn
 - implementation language: Rust
-- current release line: 0.2 module/HIR foundation with a reference evaluator
+- current release line: 0.1.3 modules, built-in mathematics, inferred constants, and simple classes
 - long-term focus: native scientific computing, data, ML, CLI, and servers
 - production backend direction: LLVM native AOT, without a production bytecode VM
 
@@ -21,11 +21,11 @@ Principles: simplicity over feature count; readable code for beginners; curly-br
 
 Required: numbers, strings, booleans, none, lists, dynamic variables, fixed-type variables, constants, expressions, functions, return, if/else, one loop construct, ranges, step, list indexing and slicing, list methods, destructuring, console I/O, mathematics, conversions, text files, diagnostics, and CLI commands new/run/check/build/fmt/test.
 
-Not implemented in 0.2: classes, async, package registry, LLVM code generation, scientific Array/DataFrame/Tensor, notebook, server runtime, WebAssembly, browser, GUI, or full LSP. These are committed roadmap layers, not current claims.
+Not implemented in 0.1.3: inheritance, async, package registry, LLVM code generation, scientific Array/DataFrame/Tensor, notebook, server runtime, WebAssembly, browser, GUI, or full LSP. These are roadmap layers, not current claims.
 
 ## Shine 1.0 architecture contract
 
-Shine preserves dynamic-by-default variables and optional fixed annotations. It adds Python/C#-style classes with enforced `public`, `private`, `protected`, and `internal` visibility; single class inheritance; multiple interfaces; `Result` plus `try/catch`; and structured `async/await` tasks.
+Shine preserves dynamic-by-default variables and optional fixed annotations. Constants never carry a type annotation because their type is inferred from their single immutable value. Classes use a deliberately small Python-like model: public by default, optional enforced `private`, automatic `self`, `init`, fields, and methods. Structured `async/await` and `Result` plus `try/catch` remain planned layers.
 
 Compilation follows source → AST → HIR → typed MIR/SSA → LLVM IR → object files → native linker. The evaluator remains a test oracle only. Scientific computing uses homogeneous Array/Tensor buffers and CPU/CUDA/Metal kernels. DataFrame uses Arrow-compatible columnar memory. The official ecosystem targets capability-equivalence with NumPy, Pandas, and SciPy through a simpler Shine API, without requiring Python at runtime.
 
@@ -84,11 +84,11 @@ age = 17
 age = "17"     // Type Error
 ~~~
 
-A const forbids reassignment and mutation of its contained value.
+A const forbids reassignment and mutation of its contained value. Its type is always inferred; `const name: Type = value` is intentionally invalid because the binding has only one immutable value.
 
 ~~~shine
 const age = 16
-const name: String = "Shine"
+const name = "Shine"
 const numbers = [1, 2, 3]
 numbers.add(4) // error
 ~~~
@@ -299,9 +299,28 @@ atan(x)
 log(x)
 log10(x)
 log2(x)
+exp(x)
+exp2(x)
+cbrt(x)
+sinh(x)
+cosh(x)
+tanh(x)
+atan2(y, x)
+degrees(x)
+radians(x)
+hypot(x, y)
+clamp(x, minimum, maximum)
+gcd(a, b)
+lcm(a, b)
+factorial(x)
+mean(list)
+median(list)
+mode(list)
+variance(list)
+std(list)
 ~~~
 
-Built-in immutable constants: PI, E, INF, NAN.
+Built-in immutable constants: PI, TAU, E, PHI, INF, NAN.
 
 Support scientific notation and digit separators:
 
@@ -481,7 +500,7 @@ fn main() {
 ~~~
 
 ~~~shine
-const PI: Float = 3.1415926535
+const PI = 3.1415926535
 
 fn circleArea(radius: Float): Float {
     return PI * radius ** 2

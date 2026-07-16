@@ -30,6 +30,8 @@ pub enum TokenKind {
     From,
     As,
     Export,
+    Class,
+    Private,
     Fn,
     Const,
     If,

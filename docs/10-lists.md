@@ -245,6 +245,26 @@ average = [10, 20, 30].mean()
 
 Всегда возвращает `Float`. Пустой список вызывает `Value Error`.
 
+### `product()`
+
+```shine
+product = [2, 3, 4].product()
+```
+
+Возвращает произведение. Пустой список возвращает `1`. Переполнение `Int` вызывает `Value Error`.
+
+### `median()`, `mode()`, `variance()` и `std()`
+
+```shine
+values = [1, 2, 2, 3]
+middle = values.median()
+common = values.mode()
+spread = values.variance()
+deviation = values.std()
+```
+
+`variance` использует population variance — деление на полное количество элементов. При нескольких модах возвращается наименьший. Пустой список вызывает `Value Error`.
+
 Все числовые агрегаты требуют только числовые элементы.
 
 ## Константные списки
@@ -254,7 +274,7 @@ const POINT = [10, 20]
 [x, y] = POINT
 ```
 
-Чтение, индексирование, срез, `have`, `index`, `len`, `copy`, `unique`, `sum`, `min`, `max` и `mean` разрешены. Мутирующие операции запрещены:
+Чтение, индексирование, срез, `have`, `index`, `len`, `copy`, `unique` и все числовые агрегаты разрешены. Мутирующие операции запрещены:
 
 - присваивание `POINT[0] = ...`;
 - `add`;
@@ -283,3 +303,8 @@ const POINT = [10, 20]
 | `min()` | нет | минимальный элемент |
 | `max()` | нет | максимальный элемент |
 | `mean()` | нет | `Float` |
+| `product()` | нет | `Int` или `Float` |
+| `median()` | нет | `Float` |
+| `mode()` | нет | `Float` |
+| `variance()` | нет | `Float` |
+| `std()` | нет | `Float` |

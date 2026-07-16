@@ -73,7 +73,7 @@ fn main() {
 }
 ```
 
-В 0.2 imports тестового entry разрешаются относительно каталога `tests/`. Импорт project packages из `src/` будет добавлен вместе с полноценным project/package loader; пока общий helper следует хранить внутри namespace тестов.
+В 0.1.3 imports тестового entry разрешаются относительно каталога `tests/`. Импорт project packages из `src/` будет добавлен вместе с полноценным project/package loader; пока общий helper следует хранить внутри namespace тестов.
 
 ## Проверка ошибок
 

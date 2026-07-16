@@ -16,6 +16,11 @@ fn main() {
     assert(values.min() == 1)
     assert(values.max() == 5)
     assert(values.mean() == 3.0)
+    assert(values.product() == 360)
+    assert(values.median() == 3.0)
+    assert(values.mode() == 3.0)
+    assert(round(values.variance(), 5) == 1.66667)
+    assert(round(values.std(), 5) == 1.29099)
 
     removed = values.del(-1)
     assert(removed == 5)

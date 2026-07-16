@@ -48,7 +48,26 @@ pub enum TypeRef {
 pub enum AssignTarget {
     Name(String, Span),
     Index(Box<Expr>, Box<Expr>, Span),
+    Member(Box<Expr>, String, Span),
     Destructure(Vec<String>, Span),
+}
+
+#[derive(Debug, Clone)]
+pub enum ClassMember {
+    Field {
+        name: String,
+        value: Expr,
+        private: bool,
+        span: Span,
+    },
+    Method {
+        name: String,
+        params: Vec<Param>,
+        return_type: Option<TypeRef>,
+        body: Block,
+        private: bool,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +107,11 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    Class {
+        name: String,
+        members: Vec<ClassMember>,
+        span: Span,
+    },
     If {
         condition: Expr,
         then_block: Block,
@@ -110,6 +134,7 @@ impl Stmt {
         match self {
             Self::Assign { span, .. }
             | Self::Function { span, .. }
+            | Self::Class { span, .. }
             | Self::If { span, .. }
             | Self::Loop { span, .. }
             | Self::Return(_, span)
@@ -178,6 +203,11 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    Member {
+        object: Box<Expr>,
+        name: String,
+        span: Span,
+    },
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
@@ -210,6 +240,7 @@ impl Expr {
             | Self::Binary { span, .. }
             | Self::Call { span, .. }
             | Self::MemberCall { span, .. }
+            | Self::Member { span, .. }
             | Self::Index { span, .. }
             | Self::Slice { span, .. }
             | Self::Range { span, .. } => *span,

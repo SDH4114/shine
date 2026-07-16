@@ -7,7 +7,9 @@
 | Имя | Значение |
 |---|---|
 | `PI` | π |
+| `TAU` | 2π |
 | `E` | число Эйлера |
+| `PHI` | золотое сечение |
 | `INF` | положительная бесконечность |
 | `NAN` | нечисловое значение IEEE 754 |
 
@@ -21,7 +23,7 @@ growth = E ** rate
 Пользователь может явно объявить собственную локальную или верхнеуровневую константу с тем же именем, затенив встроенную:
 
 ```shine
-const PI: Float = 3.1415926535
+const PI = 3.1415926535
 ```
 
 ## Базовые функции
@@ -70,10 +72,12 @@ lowest = min(4, 8, 2, 10)
 highest = max(4, 8, 2, 10)
 ```
 
-Глобальный `sum` принимает один список:
+`sum`, `product`, `mean`, `median`, `mode`, `variance` и `std` принимают один числовой список:
 
 ```shine
 total = sum([1, 2, 3])
+average = mean([1, 2, 3])
+spread = std([1, 2, 3])
 ```
 
 Эквивалентные методы:
@@ -84,6 +88,8 @@ total = values.sum()
 lowest = values.min()
 highest = values.max()
 average = values.mean()
+middle = values.median()
+spread = values.std()
 ```
 
 ## Корень
@@ -114,6 +120,17 @@ angle3 = atan(1)
 
 `asin` и `acos` принимают значения реального диапазона от `-1` до `1`. Вне домена возникает `Math Error`.
 
+Также без imports доступны:
+
+```shine
+angle = atan2(y, x)
+h = hypot(3, 4)
+hyperbolic = sinh(1) + cosh(1) + tanh(1)
+inverse = asinh(1)
+degreesValue = degrees(PI)
+radiansValue = radians(180)
+```
+
 ## Логарифмы
 
 ```shine
@@ -128,6 +145,36 @@ binary = log2(1024)
 
 Отрицательный аргумент вызывает `Math Error`. Для нуля IEEE 754-результат текущего runtime равен `-INF`.
 
+## Экспоненты и округление
+
+```shine
+growth = exp(2)
+binaryGrowth = exp2(8)
+root = cbrt(27)
+whole = trunc(3.9)
+fraction = fract(3.25)
+```
+
+## Целочисленная математика
+
+```shine
+divisor = gcd(54, 24)
+multiple = lcm(6, 8)
+ways = factorial(5)
+```
+
+`factorial` принимает `Int` от `0` до `20`, чтобы результат помещался в текущий `Int`.
+
+## Ограничения и IEEE-проверки
+
+```shine
+limited = clamp(value, 0, 100)
+direction = sign(value)
+finite = isFinite(value)
+infinite = isInfinite(value)
+notNumber = isNan(value)
+```
+
 ## Научная запись
 
 ```shine
@@ -141,9 +188,12 @@ electronCharge = 1.602176634e-19
 ## Полный список математических функций
 
 ```text
-abs  round  floor  ceil  pow  min  max  sum
-sqrt  sin  cos  tan  asin  acos  atan
-log  log10  log2
+abs  round  floor  ceil  trunc  fract  pow  sqrt  cbrt
+min  max  sum  product  mean  median  mode  variance  std
+sin  cos  tan  asin  acos  atan  atan2
+sinh  cosh  tanh  asinh  acosh  atanh
+log  log10  log2  exp  exp2  degrees  radians  hypot
+clamp  sign  gcd  lcm  factorial  isNan  isInfinite  isFinite
 ```
 
 ## Ошибки математики
@@ -157,4 +207,4 @@ Shine выдаёт понятную диагностику для:
 - некорректной степени в области действительных чисел;
 - ненулевых требований к шагу диапазона.
 
-Расширенная статистика (`median`, `mode`, `variance`, `std`) и типы `Vector`, `Matrix`, `Complex`, `Fraction` относятся к будущим версиям.
+Продвинутые алгоритмы линейной алгебры, оптимизации, интегрирования, sparse-вычислений и типы `Array`, `Matrix`, `Complex`, `Fraction` относятся к официальным scientific-модулям следующих версий.

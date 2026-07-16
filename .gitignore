@@ -1,3 +1,5 @@
 /target/
+/benchmarks/csharp/bin/
+/benchmarks/csharp/obj/
 *.tmp
 .DS_Store

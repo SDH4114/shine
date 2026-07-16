@@ -1,0 +1,24 @@
+class Counter {
+    value = 0
+    private secret = 7
+
+    fn init(start) {
+        self.value = start
+    }
+
+    fn add(amount) {
+        self.value += amount
+        return self.value
+    }
+
+    fn reveal() {
+        return self.secret
+    }
+}
+
+fn main() {
+    counter = Counter(10)
+    assert(counter.add(5) == 15)
+    assert(counter.reveal() == 7)
+    print("counter={counter.value}")
+}

@@ -20,7 +20,7 @@ pub struct Checker<'a> {
 impl<'a> Checker<'a> {
     pub fn new(source: &'a str, file: &'a str) -> Self {
         let mut prelude = HashMap::new();
-        for name in ["PI", "E", "INF", "NAN"] {
+        for name in ["PI", "TAU", "E", "PHI", "INF", "NAN"] {
             prelude.insert(
                 name.into(),
                 Symbol {
@@ -61,6 +61,16 @@ impl<'a> Checker<'a> {
                     },
                     *span,
                 )?;
+            } else if let Stmt::Class { name, span, .. } = statement {
+                self.declare(
+                    name,
+                    Symbol {
+                        ty: None,
+                        constant: true,
+                        function: None,
+                    },
+                    *span,
+                )?;
             }
         }
         for statement in &program.statements {
@@ -88,6 +98,48 @@ impl<'a> Checker<'a> {
                 self.check_block_contents(body)?;
                 self.return_type = old_return;
                 self.pop();
+            } else if let Stmt::Class { members, .. } = statement {
+                for member in members {
+                    match member {
+                        ClassMember::Field { value, .. } => {
+                            self.expr(value)?;
+                        }
+                        ClassMember::Method {
+                            params,
+                            return_type,
+                            body,
+                            span,
+                            ..
+                        } => {
+                            self.push();
+                            self.declare(
+                                "self",
+                                Symbol {
+                                    ty: None,
+                                    constant: true,
+                                    function: None,
+                                },
+                                *span,
+                            )?;
+                            for param in params {
+                                self.declare(
+                                    &param.name,
+                                    Symbol {
+                                        ty: param.ty.clone(),
+                                        constant: false,
+                                        function: None,
+                                    },
+                                    param.span,
+                                )?;
+                            }
+                            let old_return = self.return_type.clone();
+                            self.return_type = return_type.clone();
+                            self.check_block_contents(body)?;
+                            self.return_type = old_return;
+                            self.pop();
+                        }
+                    }
+                }
             } else {
                 self.check_stmt(statement)?;
             }
@@ -207,6 +259,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    AssignTarget::Member(object, _, _) => {
+                        self.expr(object)?;
+                    }
                 }
                 Ok(())
             }
@@ -291,7 +346,7 @@ impl<'a> Checker<'a> {
                 self.expr(expression)?;
                 Ok(())
             }
-            Stmt::Function { .. } => Ok(()),
+            Stmt::Function { .. } | Stmt::Class { .. } => Ok(()),
         }
     }
 
@@ -454,6 +509,7 @@ impl<'a> Checker<'a> {
                             }
                             return Ok(returns);
                         }
+                        return Ok(None);
                     }
                     if is_builtin(name) {
                         return Ok(builtin_return(name, &arg_types));
@@ -474,6 +530,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|arg| self.expr(arg))
                     .collect::<Result<Vec<_>, _>>()?;
+                if object_ty.is_none() {
+                    return Ok(None);
+                }
                 if name == "add" {
                     if let Some(TypeRef::List(Some(item))) = &object_ty {
                         for (argument, actual) in args.iter().zip(argument_types.iter()) {
@@ -500,7 +559,8 @@ impl<'a> Checker<'a> {
                     "index" => None,
                     "len" => Some(TypeRef::Int),
                     "copy" | "unique" => object_ty,
-                    "sum" | "min" | "max" | "mean" => Some(TypeRef::Number),
+                    "sum" | "product" | "min" | "max" | "mean" | "median" | "mode" | "variance"
+                    | "std" => Some(TypeRef::Number),
                     "add" | "clear" | "reverse" | "sort" => Some(TypeRef::None),
                     "del" => None,
                     _ => {
@@ -513,6 +573,10 @@ impl<'a> Checker<'a> {
                         ))
                     }
                 })
+            }
+            Expr::Member { object, .. } => {
+                self.expr(object)?;
+                Ok(None)
             }
         }
     }
@@ -818,6 +882,35 @@ fn is_builtin(name: &str) -> bool {
             | "log"
             | "log10"
             | "log2"
+            | "exp"
+            | "exp2"
+            | "cbrt"
+            | "trunc"
+            | "fract"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "asinh"
+            | "acosh"
+            | "atanh"
+            | "degrees"
+            | "radians"
+            | "hypot"
+            | "atan2"
+            | "clamp"
+            | "sign"
+            | "gcd"
+            | "lcm"
+            | "factorial"
+            | "product"
+            | "mean"
+            | "median"
+            | "mode"
+            | "variance"
+            | "std"
+            | "isNan"
+            | "isInfinite"
+            | "isFinite"
             | "assert"
     )
 }
@@ -826,11 +919,13 @@ fn builtin_return(name: &str, _: &[Option<TypeRef>]) -> Option<TypeRef> {
         "print" | "writeFile" | "assert" => Some(TypeRef::None),
         "input" | "string" | "readFile" | "type" => Some(TypeRef::String),
         "length" => Some(TypeRef::Int),
-        "bool" => Some(TypeRef::Bool),
+        "bool" | "isNan" | "isInfinite" | "isFinite" => Some(TypeRef::Bool),
+        "sign" | "gcd" | "lcm" | "factorial" => Some(TypeRef::Int),
         "number" | "abs" | "round" | "floor" | "ceil" | "pow" | "min" | "max" | "sum" | "sqrt"
-        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "log" | "log10" | "log2" => {
-            Some(TypeRef::Number)
-        }
+        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "log" | "log10" | "log2" | "exp"
+        | "exp2" | "cbrt" | "trunc" | "fract" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+        | "atanh" | "degrees" | "radians" | "hypot" | "atan2" | "clamp" | "product" | "mean"
+        | "median" | "mode" | "variance" | "std" => Some(TypeRef::Number),
         _ => None,
     }
 }

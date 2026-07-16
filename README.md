@@ -1,6 +1,6 @@
 # Shine
 
-Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.2 adds a source manager, module graph, HIR linking, explicit exports, and real multi-file execution while the tree-walking evaluator remains the semantic reference backend.
+Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model while the tree-walking evaluator remains the semantic reference backend.
 
 Полная русскоязычная документация: [docs/README.md](docs/README.md).
 
@@ -126,10 +126,33 @@ Lists support indexing, forward slicing, concatenation, repetition, and these me
 
 ```text
 add  del  remove  have  index  len  clear  copy
-unique  reverse  sort  sum  min  max  mean
+unique  reverse  sort  sum  product  min  max
+mean  median  mode  variance  std
 ```
 
-Math functions such as `sqrt`, `sin`, `log`, `round`, `min`, `max`, and `sum` are available without imports, as are `PI`, `E`, `INF`, and `NAN`. Console and text-file built-ins include `print`, `input`, `readFile`, and `writeFile`.
+Math functions such as `sqrt`, `sin`, `log`, `round`, `min`, `max`, and `sum` are available without imports, as are `PI`, `TAU`, `E`, `PHI`, `INF`, and `NAN`. Console and text-file built-ins include `print`, `input`, `readFile`, and `writeFile`.
+
+Important everyday mathematics and statistics are always available without imports, including exponentials, trigonometry, hyperbolic functions, angle conversion, `gcd`, `lcm`, `factorial`, `mean`, `median`, `mode`, `variance`, and `std`. Advanced domains remain official scientific packages.
+
+Constants infer their type from their only value:
+
+```shine
+const GRAVITY = 9.80665
+typed: Float = 9.80665
+dynamic = 9.80665
+```
+
+Classes use a small Python-like model: members are public by default, `private` is enforced, `self` is automatic, and `init` is the constructor.
+
+```shine
+class Counter {
+    value = 0
+    private secret = 7
+
+    fn init(start) { self.value = start }
+    fn add(amount) { self.value += amount }
+}
+```
 
 Tests are ordinary programs using the built-in `assert` helper:
 
@@ -158,4 +181,14 @@ cargo test
 cargo run -- run examples/statistics.shn
 ```
 
-The current implementation still excludes Web, GUI, classes, async, package management, scientific arrays, and LLVM code generation. Their committed syntax and architecture are documented in [shine-master-specification.md](shine-master-specification.md); roadmap items are not presented as implemented features.
+## Performance benchmark
+
+The repository includes checksum-validated equivalent workloads for Shine, Python, and C#:
+
+```bash
+python3 benchmarks/run_benchmarks.py
+```
+
+See [benchmarks/README.md](benchmarks/README.md) for methodology and interpretation. Current results measure the tree-walking Shine runtime, not the planned LLVM AOT backend.
+
+The current implementation still excludes Web, GUI, async, package management, scientific arrays, inheritance, and LLVM code generation. Their architecture is documented in [shine-master-specification.md](shine-master-specification.md); roadmap items are not presented as implemented features.

@@ -1,4 +1,4 @@
-const APP_NAME: String = "Shine Variables"
+const APP_NAME = "Shine Variables"
 
 fn main() {
     value = 10

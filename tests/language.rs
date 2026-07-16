@@ -281,6 +281,8 @@ from labels import label
 fn main() {
     assert(numbers.double(4) == 8)
     assert(numbers.summary(4) == "result=8")
+    scale = numbers.Scale(3)
+    assert(scale.apply(4) == 12)
     print(label())
 }
 "#,
@@ -288,7 +290,7 @@ fn main() {
     .unwrap();
     fs::write(
         src.join("math.shn"),
-        "const factor = 2\nexport fn double(value: Int): Int { return value * factor }\nexport fn summary(value: Int): String { return \"result={double(value)}\" }\nfn hidden() { return 0 }\n",
+        "const factor = 2\nexport fn double(value: Int): Int { return value * factor }\nexport fn summary(value: Int): String { return \"result={double(value)}\" }\nexport class Scale { factor = 1\nfn init(factor) { self.factor = factor }\nfn apply(value) { return value * self.factor }\n}\nfn hidden() { return 0 }\n",
     )
     .unwrap();
     fs::write(
@@ -358,4 +360,113 @@ fn modules_enforce_exports_and_reject_cycles() {
     assert_eq!(cycle.category, "Module Error");
     assert!(cycle.message.contains("cyclic import"));
     fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn important_math_is_available_without_imports() {
+    let source = r#"
+fn main() {
+    assert(TAU == 2 * PI)
+    assert(round(PHI, 3) == 1.618)
+    assert(round(exp(1), 10) == round(E, 10))
+    assert(cbrt(27) == 3)
+    assert(round(degrees(PI), 5) == 180.0)
+    assert(round(radians(180), 5) == round(PI, 5))
+    assert(hypot(3, 4) == 5)
+    assert(sign(-8) == -1)
+    assert(clamp(12, 0, 10) == 10)
+    assert(gcd(54, 24) == 6)
+    assert(lcm(6, 8) == 24)
+    assert(factorial(5) == 120)
+    values = [1, 2, 2, 3]
+    assert(product(values) == 12)
+    assert(mean(values) == 2)
+    assert(median(values) == 2)
+    assert(mode(values) == 2)
+    assert(variance(values) == 0.5)
+    assert(round(std(values), 5) == 0.70711)
+    assert(values.median() == 2)
+    assert(isFinite(PI))
+    assert(isInfinite(INF))
+    assert(isNan(NAN))
+}
+"#;
+    check_source(source, "math-builtins.shn").unwrap();
+    run_source(source, "math-builtins.shn").unwrap();
+}
+
+#[test]
+fn constants_infer_type_while_variables_keep_both_forms() {
+    let source = r#"
+const GRAVITY = 9.80665
+typed: Float = 9.80665
+dynamic = 9.80665
+typed = 10.0
+dynamic = "changed"
+assert(GRAVITY > 9.8)
+"#;
+    check_source(source, "const-simple.shn").unwrap();
+    run_source(source, "const-simple.shn").unwrap();
+
+    let error = check_source("const GRAVITY: Float = 9.80665\n", "const-typed.shn").unwrap_err();
+    assert_eq!(error.category, "Syntax Error");
+    assert!(error.message.contains("do not use type annotations"));
+}
+
+#[test]
+fn python_like_classes_support_fields_methods_and_real_privacy() {
+    let source = r#"
+class Counter {
+    value = 0
+    private secret = 7
+
+    fn init(start) {
+        self.value = start
+    }
+
+    fn add(amount) {
+        self.value += amount
+        return self.value
+    }
+
+    private fn hidden() {
+        return self.secret
+    }
+
+    fn reveal() {
+        return self.hidden()
+    }
+}
+
+fn main() {
+    counter = Counter(10)
+    assert(counter.value == 10)
+    assert(counter.add(5) == 15)
+    assert(counter.reveal() == 7)
+    assert("value={counter.value}" == "value=15")
+}
+"#;
+    check_source(source, "classes.shn").unwrap();
+    run_source(source, "classes.shn").unwrap();
+
+    let private_field = run_source(
+        "class Box { private value = 1 }\nbox = Box()\nprint(box.value)\n",
+        "private-field.shn",
+    )
+    .unwrap_err();
+    assert_eq!(private_field.category, "Access Error");
+
+    let private_method = run_source(
+        "class Box { private fn value() { return 1 } }\nbox = Box()\nbox.value()\n",
+        "private-method.shn",
+    )
+    .unwrap_err();
+    assert_eq!(private_method.category, "Access Error");
+
+    let constant_object = run_source(
+        "class Box { value = 1\nfn change() { self.value = 2 }\n}\nconst box = Box()\nbox.change()\n",
+        "constant-object.shn",
+    )
+    .unwrap_err();
+    assert_eq!(constant_object.category, "Const Error");
 }

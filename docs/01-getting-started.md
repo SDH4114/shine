@@ -37,7 +37,7 @@ shine version
 Ожидаемый результат:
 
 ```text
-Shine 0.2.0
+Shine 0.1.3
 ```
 
 Если команда была установлена Cargo, но терминал пишет `command not found`, выполните на Apple Silicon Mac:

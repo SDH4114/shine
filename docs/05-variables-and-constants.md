@@ -52,7 +52,7 @@ empty: None = none
 
 ```shine
 const MAX_USERS = 100
-const APP_NAME: String = "Shine Tool"
+const APP_NAME = "Shine Tool"
 ```
 
 Также запрещена мутация списка, принадлежащего константе:
@@ -76,11 +76,21 @@ working.add(4)
 
 ## Константы и типы
 
-Можно объединить `const` и аннотацию:
+Константа получает тип из своего единственного значения, поэтому отдельная аннотация запрещена:
 
 ```shine
-const GRAVITY: Float = 9.80665
-const LABELS: List[String] = ["low", "normal", "high"]
+const GRAVITY = 9.80665
+const LABELS = ["low", "normal", "high"]
+```
+
+Запись `const GRAVITY: Float = 9.80665` выдаёт понятную `Syntax Error`. Если значение должно меняться, используйте один из двух обычных вариантов:
+
+```shine
+// Фиксированный тип, значение можно менять.
+GRAVITY: Float = 9.80665
+
+// Динамическая переменная.
+gravity = 9.80665
 ```
 
 ## Область видимости

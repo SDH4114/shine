@@ -1,6 +1,6 @@
 # Ограничения MVP и дальнейшее развитие
 
-Эта документация начиналась с Shine 0.1.0. В 0.2.0 добавлены многомодульные программы, `import`, явный `export`, source manager, module graph и HIR-linking. Остальные возможности по-прежнему намеренно ограничены.
+Shine 0.1.3 включает многомодульные программы, `import`, явный `export`, source manager, HIR-linking, простые классы и расширенную встроенную математику. Остальные возможности по-прежнему намеренно ограничены.
 
 ## Что входит в MVP
 
@@ -29,8 +29,7 @@
 - overload;
 - generics;
 - macros;
-- classes и inheritance;
-- interfaces или traits на уровне Shine;
+- inheritance, interfaces и abstract classes;
 - исключений и `try/catch`;
 - pattern matching;
 - отдельного `while` или `for` — используется только `loop`;

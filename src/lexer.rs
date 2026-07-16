@@ -241,6 +241,8 @@ impl<'a> Lexer<'a> {
             "from" => TokenKind::From,
             "as" => TokenKind::As,
             "export" => TokenKind::Export,
+            "class" => TokenKind::Class,
+            "private" => TokenKind::Private,
             "fn" => TokenKind::Fn,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,

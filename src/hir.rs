@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    ast::{AssignTarget, Block, Expr, ImportKind, LoopKind, Program, Stmt},
+    ast::{AssignTarget, Block, ClassMember, Expr, ImportKind, LoopKind, Program, Stmt},
     diagnostics::Diagnostic,
     lexer::Lexer,
     modules::ModuleGraph,
@@ -28,7 +28,7 @@ pub fn lower(graph: ModuleGraph) -> Result<HirProgram, Diagnostic> {
         let mut names = HashMap::new();
         for statement in &module.program.statements {
             let name = match statement {
-                Stmt::Function { name, .. } => Some(name),
+                Stmt::Function { name, .. } | Stmt::Class { name, .. } => Some(name),
                 Stmt::Assign {
                     target: AssignTarget::Name(name, _),
                     ..
@@ -201,6 +201,57 @@ impl Renamer<'_> {
                     span,
                 }
             }
+            Stmt::Class {
+                name,
+                members,
+                span,
+            } => {
+                let name = self.own_globals.get(&name).cloned().unwrap_or(name);
+                let members = members
+                    .into_iter()
+                    .map(|member| match member {
+                        ClassMember::Field {
+                            name,
+                            value,
+                            private,
+                            span,
+                        } => Ok(ClassMember::Field {
+                            name,
+                            value: self.expression(value)?,
+                            private,
+                            span,
+                        }),
+                        ClassMember::Method {
+                            name,
+                            params,
+                            return_type,
+                            body,
+                            private,
+                            span,
+                        } => {
+                            let mut locals: HashSet<String> =
+                                params.iter().map(|param| param.name.clone()).collect();
+                            locals.insert("self".into());
+                            self.scopes.push(locals);
+                            let body = self.block(body)?;
+                            self.scopes.pop();
+                            Ok(ClassMember::Method {
+                                name,
+                                params,
+                                return_type,
+                                body,
+                                private,
+                                span,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                Stmt::Class {
+                    name,
+                    members,
+                    span,
+                }
+            }
             Stmt::If {
                 condition,
                 then_block,
@@ -295,6 +346,9 @@ impl Renamer<'_> {
                 Box::new(self.expression(*index)?),
                 span,
             ),
+            AssignTarget::Member(object, name, span) => {
+                AssignTarget::Member(Box::new(self.expression(*object)?), name, span)
+            }
         })
     }
 
@@ -395,6 +449,11 @@ impl Renamer<'_> {
                     span,
                 }
             }
+            Expr::Member { object, name, span } => Expr::Member {
+                object: Box::new(self.expression(*object)?),
+                name,
+                span,
+            },
             Expr::Index {
                 object,
                 index,

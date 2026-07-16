@@ -1,6 +1,6 @@
 # Модули и развитие языка
 
-## Реализовано в Shine 0.2
+## Реализовано в Shine 0.1.3
 
 Один `.shn`-файл является одним модулем. Imports разрешаются относительно каталога entry-файла:
 
@@ -44,9 +44,9 @@ from math import square as powerTwo
 
 Модуль `science.stats` ищется как `science/stats.shn`, затем как `science/stats/mod.shn`. Импортировать можно только объявления с `export`. Циклические imports, отсутствующие модули, private symbols и конфликты alias завершаются `Module Error` до выполнения программы.
 
-Namespace import в 0.2 предназначен для вызова экспортированных функций (`math.square(2)`). Экспортированные значения можно импортировать формой `from math import PI`. Универсальный member access появится вместе с object model.
+Namespace import предназначен для вызова экспортированных функций (`math.square(2)`). Экспортированные значения можно импортировать формой `from math import PI`. Object member access реализован для экземпляров классов.
 
-## Pipeline 0.2
+## Pipeline 0.1.3
 
 ```text
 entry source
@@ -62,24 +62,23 @@ entry source
 
 ## Зафиксированный синтаксис следующих этапов
 
-Следующие формы являются design contract, но parser 0.2 пока их не принимает:
+Простая реализованная форма класса:
 
 ```shine
-public class Model: BaseModel, Predictable {
-    private weights: Array[Float]
-    protected name: String
-    internal cache: Map[String, Object]
+class Model {
+    weights = []
+    private cache = []
 
-    public init(weights: Array[Float]) {
+    fn init(weights) {
         self.weights = weights
     }
 }
 ```
 
-- одиночное наследование класса;
-- несколько interfaces;
-- `public`, `private`, `protected`, `internal` проверяются компилятором;
-- reflection не обходит visibility.
+- поля и методы public по умолчанию;
+- `private` действительно блокирует внешний доступ;
+- `self` добавляется методу автоматически;
+- inheritance и interfaces не входят в 0.1.3.
 
 ```shine
 fn parse(text: String): Result[Float, ParseError] {

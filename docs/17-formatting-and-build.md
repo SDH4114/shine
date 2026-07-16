@@ -93,7 +93,7 @@ source → lexer → tokens/spans → parser → AST → checker → backend
 
 Текущий backend исполняет связанный HIR/AST через evaluator. `build` упаковывает backend и source bundle, но пока не переводит программу в машинный код.
 
-Это сознательная архитектурная граница 0.2.0. Зафиксированный следующий production backend:
+Это сознательная архитектурная граница 0.1.3. Зафиксированный следующий production backend:
 
 - typed MIR/SSA;
 - LLVM IR;
