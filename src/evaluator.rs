@@ -42,7 +42,7 @@ pub enum Value {
     String(String),
     List(Rc<RefCell<Vec<Value>>>, bool),
     Range(i64, i64),
-    Function(FunctionValue),
+    Function(Rc<FunctionValue>),
     Class(Rc<ClassValue>),
     Instance(Rc<RefCell<InstanceValue>>, bool),
 }
@@ -70,7 +70,7 @@ struct FieldDefinition {
 
 #[derive(Clone)]
 struct MethodDefinition {
-    function: FunctionValue,
+    function: Rc<FunctionValue>,
     private: bool,
 }
 
@@ -184,6 +184,94 @@ struct Binding {
     ty: Option<TypeRef>,
     constant: bool,
 }
+
+#[derive(Default)]
+struct Scope {
+    names: HashMap<String, usize>,
+    bindings: Vec<Binding>,
+}
+
+impl Scope {
+    fn contains_key(&self, name: &str) -> bool {
+        self.names.contains_key(name)
+    }
+
+    fn get(&self, name: &str) -> Option<&Binding> {
+        self.names.get(name).map(|index| &self.bindings[*index])
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        let index = *self.names.get(name)?;
+        Some(&mut self.bindings[index])
+    }
+
+    fn insert(&mut self, name: String, binding: Binding) {
+        if let Some(index) = self.names.get(&name).copied() {
+            self.bindings[index] = binding;
+        } else {
+            let index = self.bindings.len();
+            self.bindings.push(binding);
+            self.names.insert(name, index);
+        }
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Binding> {
+        self.bindings.iter()
+    }
+
+    fn retain_only(&mut self, name: &str) {
+        if self.names.len() <= 1 {
+            return;
+        }
+        let index = self.names[name];
+        if index != 0 {
+            self.bindings.swap(0, index);
+        }
+        self.bindings.truncate(1);
+        self.names.clear();
+        self.names.insert(name.to_owned(), 0);
+    }
+
+    fn binding(&self, index: usize) -> &Binding {
+        &self.bindings[index]
+    }
+
+    fn binding_mut(&mut self, index: usize) -> &mut Binding {
+        &mut self.bindings[index]
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CachedLocation {
+    Absolute { scope: usize, slot: usize },
+    Relative { depth: usize, slot: usize },
+    Missing,
+}
+
+#[derive(Clone, Copy)]
+struct BindingCacheEntry {
+    key: usize,
+    generation: u64,
+    location: CachedLocation,
+}
+
+impl Default for BindingCacheEntry {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            generation: 0,
+            location: CachedLocation::Absolute { scope: 0, slot: 0 },
+        }
+    }
+}
+
+const BINDING_CACHE_SIZE: usize = 2048;
+
+#[derive(Clone, Copy)]
+struct FastNumber {
+    value: f64,
+    is_float: bool,
+}
 enum Flow {
     Normal,
     Return(Value),
@@ -195,14 +283,17 @@ pub struct Evaluator<'a> {
     source: &'a str,
     file: &'a str,
     output: bool,
-    scopes: Vec<HashMap<String, Binding>>,
+    scopes: Vec<Scope>,
+    binding_cache: Vec<BindingCacheEntry>,
+    binding_cache_generation: u64,
+    frame_bases: Vec<usize>,
     call_depth: usize,
     class_stack: Vec<String>,
 }
 
 impl<'a> Evaluator<'a> {
     pub fn new(source: &'a str, file: &'a str, output: bool) -> Self {
-        let mut global = HashMap::default();
+        let mut global = Scope::default();
         for (name, value) in [
             ("PI", Value::Float(std::f64::consts::PI)),
             ("TAU", Value::Float(std::f64::consts::TAU)),
@@ -224,7 +315,10 @@ impl<'a> Evaluator<'a> {
             source,
             file,
             output,
-            scopes: vec![global, HashMap::default()],
+            scopes: vec![global, Scope::default()],
+            binding_cache: vec![BindingCacheEntry::default(); BINDING_CACHE_SIZE],
+            binding_cache_generation: 1,
+            frame_bases: vec![2],
             call_depth: 0,
             class_stack: vec![],
         }
@@ -258,7 +352,7 @@ impl<'a> Evaluator<'a> {
                 self.check_stmt(s)?;
             }
         }
-        let funcs: Vec<FunctionValue> = self
+        let funcs: Vec<Rc<FunctionValue>> = self
             .scopes
             .iter()
             .flat_map(|scope| scope.values())
@@ -296,11 +390,11 @@ impl<'a> Evaluator<'a> {
             {
                 self.define(
                     name,
-                    Value::Function(FunctionValue {
+                    Value::Function(Rc::new(FunctionValue {
                         params: params.clone(),
                         return_type: return_type.clone(),
                         body: body.clone(),
-                    }),
+                    })),
                     None,
                     true,
                     *span,
@@ -349,11 +443,11 @@ impl<'a> Evaluator<'a> {
                             methods.insert(
                                 name.clone(),
                                 MethodDefinition {
-                                    function: FunctionValue {
+                                    function: Rc::new(FunctionValue {
                                         params: params.clone(),
                                         return_type: return_type.clone(),
                                         body: body.clone(),
-                                    },
+                                    }),
                                     private: *private,
                                 },
                             );
@@ -454,6 +548,16 @@ impl<'a> Evaluator<'a> {
                 op,
                 span,
             } => {
+                if !constant && ty.is_none() {
+                    if let Some(result) = self.try_int_assignment(target, value, *op, *span) {
+                        result?;
+                        return Ok(Flow::Normal);
+                    }
+                    if let Some(result) = self.try_float_assignment(target, value, *op, *span) {
+                        result?;
+                        return Ok(Flow::Normal);
+                    }
+                }
                 let mut v = self.eval(value)?;
                 if *constant {
                     v = v.frozen();
@@ -538,6 +642,7 @@ impl<'a> Evaluator<'a> {
             } => {
                 let iterable = self.eval(iterable)?;
                 self.push();
+                self.define(name, Value::None, None, false, span)?;
                 let result = match iterable {
                     Value::Range(a, z) => {
                         let step = if let Some(e) = step {
@@ -635,15 +740,11 @@ impl<'a> Evaluator<'a> {
         span: Span,
     ) -> Result<Flow, Diagnostic> {
         let loop_scope = self.scopes.len() - 1;
-        self.scopes[loop_scope].clear();
-        self.scopes[loop_scope].insert(
-            name.into(),
-            Binding {
-                value,
-                ty: None,
-                constant: false,
-            },
-        );
+        if self.scopes[loop_scope].names.len() > 1 {
+            self.invalidate_binding_cache();
+        }
+        self.scopes[loop_scope].retain_only(name);
+        self.scopes[loop_scope].get_mut(name).unwrap().value = value;
         for statement in &body.statements {
             let flow = self.exec(statement)?;
             if !matches!(flow, Flow::Normal) {
@@ -676,19 +777,19 @@ impl<'a> Evaluator<'a> {
                             return Err(self.error("Name Error",format!("variable `{name}` is already defined"),*name_span,"A variable cannot be declared twice in the same visible scope.","Choose another name or reassign without `const` or a type annotation."));
                         }
                         self.define(name, value, ty, constant, *name_span)
-                    } else if let Some(scope) = self.binding_scope(name) {
-                        self.reassign_in_scope(scope, name, value, *name_span)
+                    } else if let Some((scope, slot)) = self.binding_location_cached(name) {
+                        self.reassign_at(scope, slot, name, value, *name_span)
                     } else {
                         self.define(name, value, ty, constant, *name_span)
                     }
                 } else {
-                    let scope = self
-                        .binding_scope(name)
+                    let (scope, slot) = self
+                        .binding_location_cached(name)
                         .ok_or_else(|| self.unknown(name, *name_span))?;
-                    if self.try_compound_numeric(scope, name, op, &value, *name_span)? {
+                    if self.try_compound_numeric(scope, slot, name, op, &value, *name_span)? {
                         return Ok(());
                     }
-                    let old = self.scopes[scope].get(name).unwrap().value.clone();
+                    let old = self.scopes[scope].binding(slot).value.clone();
                     let v = self.binary(
                         old,
                         match op {
@@ -701,7 +802,7 @@ impl<'a> Evaluator<'a> {
                         value,
                         span,
                     )?;
-                    self.reassign_in_scope(scope, name, v, *name_span)
+                    self.reassign_at(scope, slot, name, v, *name_span)
                 }
             }
             AssignTarget::Destructure(names, target_span) => {
@@ -806,6 +907,306 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn try_int_assignment(
+        &mut self,
+        target: &AssignTarget,
+        expression: &Expr,
+        operation: AssignOp,
+        span: Span,
+    ) -> Option<Result<(), Diagnostic>> {
+        let AssignTarget::Name(name, name_span) = target else {
+            return None;
+        };
+        let right = match self.eval_int(expression)? {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let location = self.binding_location_cached(name);
+        if matches!(operation, AssignOp::Set) {
+            if let Some((scope, slot)) = location {
+                let binding = self.scopes[scope].binding(slot);
+                if binding.constant
+                    || !matches!(binding.ty, None | Some(TypeRef::Int | TypeRef::Number))
+                {
+                    return None;
+                }
+                self.scopes[scope].binding_mut(slot).value = Value::Int(right);
+                return Some(Ok(()));
+            }
+            return Some(self.define(name, Value::Int(right), None, false, *name_span));
+        }
+
+        let (scope, slot) = location?;
+        let binding = self.scopes[scope].binding(slot);
+        let Value::Int(left) = binding.value else {
+            return None;
+        };
+        if binding.constant {
+            return None;
+        }
+        let value = match operation {
+            AssignOp::Add => left.checked_add(right),
+            AssignOp::Subtract => left.checked_sub(right),
+            AssignOp::Multiply => left.checked_mul(right),
+            AssignOp::Divide | AssignOp::Set => return None,
+        };
+        let value = match value {
+            Some(value) => value,
+            None => return Some(Err(integer_overflow(span, self.file, self.source))),
+        };
+        self.scopes[scope].binding_mut(slot).value = Value::Int(value);
+        Some(Ok(()))
+    }
+
+    fn eval_int(&mut self, expression: &Expr) -> Option<Result<i64, Diagnostic>> {
+        match expression {
+            Expr::Int(value, _) => Some(Ok(*value)),
+            Expr::Name(name, _) => {
+                let (scope, slot) = self.binding_location_cached(name)?;
+                match self.scopes[scope].binding(slot).value {
+                    Value::Int(value) => Some(Ok(value)),
+                    _ => None,
+                }
+            }
+            Expr::Unary {
+                op: UnaryOp::Positive,
+                value,
+                ..
+            } => self.eval_int(value),
+            Expr::Unary {
+                op: UnaryOp::Negate,
+                value,
+                span,
+            } => {
+                let value = match self.eval_int(value)? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                Some(
+                    value
+                        .checked_neg()
+                        .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
+                )
+            }
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            } if matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::IntegerDivide
+                    | BinaryOp::Remainder
+            ) =>
+            {
+                let left = match self.eval_int(left)? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                let right = match self.eval_int(right)? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                let value = match op {
+                    BinaryOp::Add => left.checked_add(right),
+                    BinaryOp::Subtract => left.checked_sub(right),
+                    BinaryOp::Multiply => left.checked_mul(right),
+                    BinaryOp::IntegerDivide => {
+                        if right == 0 {
+                            return Some(Err(self.zero(*span)));
+                        }
+                        left.checked_div(right)
+                    }
+                    BinaryOp::Remainder => {
+                        if right == 0 {
+                            return Some(Err(self.zero(*span)));
+                        }
+                        left.checked_rem(right)
+                    }
+                    _ => unreachable!(),
+                };
+                Some(value.ok_or_else(|| integer_overflow(*span, self.file, self.source)))
+            }
+            _ => None,
+        }
+    }
+
+    fn try_float_assignment(
+        &mut self,
+        target: &AssignTarget,
+        expression: &Expr,
+        operation: AssignOp,
+        span: Span,
+    ) -> Option<Result<(), Diagnostic>> {
+        let AssignTarget::Name(name, name_span) = target else {
+            return None;
+        };
+        let right = match self.eval_float(expression)? {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        // Keep exact runtime typing: a pure Int expression remains Int rather than
+        // being accepted as an implicit Float conversion by this specialized path.
+        if !right.is_float {
+            return None;
+        }
+        let right = right.value;
+        let location = self.binding_location_cached(name);
+        if matches!(operation, AssignOp::Set) {
+            if let Some((scope, slot)) = location {
+                let binding = self.scopes[scope].binding(slot);
+                if binding.constant
+                    || !matches!(binding.ty, None | Some(TypeRef::Float | TypeRef::Number))
+                {
+                    return None;
+                }
+                self.scopes[scope].binding_mut(slot).value = Value::Float(right);
+                return Some(Ok(()));
+            }
+            return Some(self.define(name, Value::Float(right), None, false, *name_span));
+        }
+
+        let (scope, slot) = location?;
+        let binding = self.scopes[scope].binding(slot);
+        if binding.constant {
+            return None;
+        }
+        let left = match binding.value {
+            Value::Float(value) => value,
+            Value::Int(value) => value as f64,
+            _ => return None,
+        };
+        let value = match operation {
+            AssignOp::Add => left + right,
+            AssignOp::Subtract => left - right,
+            AssignOp::Multiply => left * right,
+            AssignOp::Divide => {
+                if right == 0.0 {
+                    return Some(Err(self.zero(span)));
+                }
+                left / right
+            }
+            AssignOp::Set => unreachable!(),
+        };
+        self.scopes[scope].binding_mut(slot).value = Value::Float(value);
+        Some(Ok(()))
+    }
+
+    fn eval_float(&mut self, expression: &Expr) -> Option<Result<FastNumber, Diagnostic>> {
+        match expression {
+            Expr::Int(value, _) => Some(Ok(FastNumber {
+                value: *value as f64,
+                is_float: false,
+            })),
+            Expr::Float(value, _) => Some(Ok(FastNumber {
+                value: *value,
+                is_float: true,
+            })),
+            Expr::Name(name, _) => {
+                let (scope, slot) = self.binding_location_cached(name)?;
+                match self.scopes[scope].binding(slot).value {
+                    Value::Int(value) => Some(Ok(FastNumber {
+                        value: value as f64,
+                        is_float: false,
+                    })),
+                    Value::Float(value) => Some(Ok(FastNumber {
+                        value,
+                        is_float: true,
+                    })),
+                    _ => None,
+                }
+            }
+            Expr::Unary {
+                op: UnaryOp::Positive,
+                value,
+                ..
+            } => self.eval_float(value),
+            Expr::Unary {
+                op: UnaryOp::Negate,
+                value,
+                ..
+            } => Some(self.eval_float(value)?.map(|value| FastNumber {
+                value: -value.value,
+                is_float: value.is_float,
+            })),
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            } if matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::Divide
+                    | BinaryOp::IntegerDivide
+                    | BinaryOp::Remainder
+            ) =>
+            {
+                let left = match self.eval_float(left)? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                let right = match self.eval_float(right)? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                if right.value == 0.0
+                    && matches!(
+                        op,
+                        BinaryOp::Divide | BinaryOp::IntegerDivide | BinaryOp::Remainder
+                    )
+                {
+                    return Some(Err(self.zero(*span)));
+                }
+                let is_float = left.is_float || right.is_float || matches!(op, BinaryOp::Divide);
+                let value = match op {
+                    BinaryOp::Add => left.value + right.value,
+                    BinaryOp::Subtract => left.value - right.value,
+                    BinaryOp::Multiply => left.value * right.value,
+                    BinaryOp::Divide => left.value / right.value,
+                    BinaryOp::IntegerDivide => (left.value / right.value).floor(),
+                    BinaryOp::Remainder => left.value % right.value,
+                    _ => unreachable!(),
+                };
+                Some(Ok(FastNumber { value, is_float }))
+            }
+            Expr::Call { callee, args, span } if args.len() == 1 => {
+                let Expr::Name(name, _) = callee.as_ref() else {
+                    return None;
+                };
+                if self.binding_location_cached(name).is_some() {
+                    return None;
+                }
+                let operation = unary_math_operation(name)?;
+                let input = match self.eval_float(&args[0])? {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                let output = operation(input.value);
+                if output.is_nan() {
+                    Some(Err(self.error(
+                        "Math Error",
+                        format!("{name} produced an invalid result"),
+                        *span,
+                        "The input is outside the real-number domain.",
+                        "Use a value in the function's valid domain.",
+                    )))
+                } else {
+                    Some(Ok(FastNumber {
+                        value: output,
+                        is_float: true,
+                    }))
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn eval(&mut self, e: &Expr) -> Result<Value, Diagnostic> {
         match e {
             Expr::None(_) => Ok(Value::None),
@@ -822,10 +1223,7 @@ impl<'a> Evaluator<'a> {
                 )),
                 false,
             )),
-            Expr::Name(n, s) => self
-                .get(n)
-                .map(|b| b.value)
-                .ok_or_else(|| self.unknown(n, *s)),
+            Expr::Name(n, s) => self.get_cached(n).ok_or_else(|| self.unknown(n, *s)),
             Expr::Unary { op, value, span } => {
                 let v = self.eval(value)?;
                 match op {
@@ -927,16 +1325,27 @@ impl<'a> Evaluator<'a> {
                 self.slice(obj, a, z, *span)
             }
             Expr::Call { callee, args, span } => {
-                let values = args
-                    .iter()
-                    .map(|x| self.eval(x))
-                    .collect::<Result<Vec<_>, _>>()?;
                 if let Expr::Name(name, _) = callee.as_ref() {
                     if self.get(name).is_none() {
+                        if let Some(result) = self.call_builtin_expr(name, args, *span) {
+                            return result;
+                        }
+                        let values = args
+                            .iter()
+                            .map(|x| self.eval(x))
+                            .collect::<Result<Vec<_>, _>>()?;
                         return self.call_builtin(name, values, *span);
                     }
+                    let values = args
+                        .iter()
+                        .map(|x| self.eval(x))
+                        .collect::<Result<Vec<_>, _>>()?;
                     self.call_named(name, values, *span)
                 } else {
+                    let values = args
+                        .iter()
+                        .map(|x| self.eval(x))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let f = self.eval(callee)?;
                     self.call_value(f, values, *span)
                 }
@@ -947,15 +1356,33 @@ impl<'a> Evaluator<'a> {
                 args,
                 span,
             } => {
-                let expected_item = if let Expr::Name(object_name, _) = object.as_ref() {
-                    self.get(object_name).and_then(|binding| match binding.ty {
-                        Some(TypeRef::List(Some(item))) => Some(*item),
-                        _ => None,
-                    })
+                let cached_object = if let Expr::Name(object_name, _) = object.as_ref() {
+                    self.get_cached_binding(object_name)
                 } else {
                     None
                 };
-                let obj = self.eval(object)?;
+                let expected_item = cached_object.clone().and_then(|binding| match binding.ty {
+                    Some(TypeRef::List(Some(item))) => Some(*item),
+                    _ => None,
+                });
+                let obj = if let Some(binding) = cached_object {
+                    binding.value
+                } else {
+                    self.eval(object)?
+                };
+                if let Value::List(items, frozen) = &obj {
+                    if name == "add" && args.len() == 1 {
+                        if *frozen {
+                            return Err(self.const_error(*span));
+                        }
+                        let value = self.eval(&args[0])?;
+                        if let Some(expected) = &expected_item {
+                            self.ensure_type(&value, expected, *span)?;
+                        }
+                        items.borrow_mut().push(value);
+                        return Ok(Value::None);
+                    }
+                }
                 let values = args
                     .iter()
                     .map(|x| self.eval(x))
@@ -1129,7 +1556,7 @@ impl<'a> Evaluator<'a> {
 
     fn call_function(
         &mut self,
-        f: FunctionValue,
+        f: Rc<FunctionValue>,
         args: Vec<Value>,
         receiver: Option<Value>,
         owner: Option<String>,
@@ -1158,7 +1585,9 @@ impl<'a> Evaluator<'a> {
                 "Add a stopping condition.",
             ));
         }
+        let frame_base = self.scopes.len();
         self.push();
+        self.frame_bases.push(frame_base);
         if let Some(receiver) = receiver {
             self.define("self", receiver, None, true, span)?;
         }
@@ -1188,6 +1617,7 @@ impl<'a> Evaluator<'a> {
             }
         }
         self.pop();
+        self.frame_bases.pop();
         if owner.is_some() {
             self.class_stack.pop();
         }
@@ -1612,6 +2042,33 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn call_builtin_expr(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Result<Value, Diagnostic>> {
+        let operation = unary_math_operation(name)?;
+        Some((|| {
+            if args.len() != 1 {
+                return Err(self.arg_error(span, name, 1, args.len()));
+            }
+            let value = self.eval(&args[0])?;
+            let output = operation(as_number(&value, span, self)?);
+            if output.is_nan() {
+                Err(self.error(
+                    "Math Error",
+                    format!("{name} produced an invalid result"),
+                    span,
+                    "The input is outside the real-number domain.",
+                    "Use a value in the function's valid domain.",
+                ))
+            } else {
+                Ok(Value::Float(output))
+            }
+        })())
+    }
+
     fn interpolate(&mut self, text: &str, span: Span) -> Result<Value, Diagnostic> {
         let mut out = String::new();
         let chars: Vec<char> = text.chars().collect();
@@ -1666,6 +2123,9 @@ impl<'a> Evaluator<'a> {
                             "Put a valid Shine expression inside the braces.",
                         )
                     })?;
+                // Interpolation expressions are parsed into a temporary AST. Clear address-based
+                // binding locations so an allocator-reused String cannot inherit an old slot.
+                self.invalidate_binding_cache();
                 out.push_str(&self.eval(&parsed)?.to_string());
                 i += 1
             } else if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
@@ -1732,6 +2192,7 @@ impl<'a> Evaluator<'a> {
                 constant,
             },
         );
+        self.invalidate_binding_cache();
         Ok(())
     }
     fn reassign_in_scope(
@@ -1741,8 +2202,19 @@ impl<'a> Evaluator<'a> {
         value: Value,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        let slot = self.scopes[scope].names[name];
+        self.reassign_at(scope, slot, name, value, span)
+    }
+    fn reassign_at(
+        &mut self,
+        scope: usize,
+        slot: usize,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let (constant, ty) = {
-            let binding = self.scopes[scope].get(name).unwrap();
+            let binding = self.scopes[scope].binding(slot);
             (binding.constant, binding.ty.clone())
         };
         if constant {
@@ -1757,18 +2229,19 @@ impl<'a> Evaluator<'a> {
         if let Some(ty) = &ty {
             self.ensure_type(&value, ty, span)?;
         }
-        self.scopes[scope].get_mut(name).unwrap().value = value;
+        self.scopes[scope].binding_mut(slot).value = value;
         Ok(())
     }
     fn try_compound_numeric(
         &mut self,
         scope: usize,
+        slot: usize,
         name: &str,
         operation: AssignOp,
         right: &Value,
         span: Span,
     ) -> Result<bool, Diagnostic> {
-        if self.scopes[scope].get(name).unwrap().constant {
+        if self.scopes[scope].binding(slot).constant {
             return Err(self.error(
                 "Const Error",
                 format!("cannot reassign constant `{name}`"),
@@ -1777,7 +2250,7 @@ impl<'a> Evaluator<'a> {
                 "Create a new variable instead.",
             ));
         }
-        let binding = self.scopes[scope].get_mut(name).unwrap();
+        let binding = self.scopes[scope].binding_mut(slot);
         let optimized = match (&mut binding.value, operation, right) {
             (Value::Int(left), AssignOp::Add, Value::Int(right)) => {
                 *left = left
@@ -1858,15 +2331,88 @@ impl<'a> Evaluator<'a> {
             .rev()
             .find_map(|scope| scope.get(n).cloned())
     }
+    fn get_cached(&mut self, name: &str) -> Option<Value> {
+        let (scope, slot) = self.binding_location_cached(name)?;
+        Some(self.scopes[scope].binding(slot).value.clone())
+    }
+    fn get_cached_binding(&mut self, name: &str) -> Option<Binding> {
+        let (scope, slot) = self.binding_location_cached(name)?;
+        Some(self.scopes[scope].binding(slot).clone())
+    }
+    fn binding_location_cached(&mut self, name: &str) -> Option<(usize, usize)> {
+        let key = name.as_ptr() as usize;
+        let cache_index = ((key >> 4) ^ (key >> 17)) & (BINDING_CACHE_SIZE - 1);
+        let entry = self.binding_cache[cache_index];
+        if entry.generation == self.binding_cache_generation && entry.key == key {
+            let (scope, slot) = match entry.location {
+                CachedLocation::Absolute { scope, slot } => (scope, slot),
+                CachedLocation::Relative { depth, slot } => {
+                    (self.scopes.len().checked_sub(depth + 1)?, slot)
+                }
+                CachedLocation::Missing => return None,
+            };
+            return Some((scope, slot));
+        }
+
+        let Some((scope, slot)) =
+            self.scopes
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(scope, bindings)| {
+                    bindings.names.get(name).copied().map(|slot| (scope, slot))
+                })
+        else {
+            self.binding_cache[cache_index] = BindingCacheEntry {
+                key,
+                generation: self.binding_cache_generation,
+                location: CachedLocation::Missing,
+            };
+            return None;
+        };
+        let frame_base = *self.frame_bases.last().unwrap();
+        let location = if scope <= 1 {
+            Some(CachedLocation::Absolute { scope, slot })
+        } else if scope >= frame_base {
+            Some(CachedLocation::Relative {
+                depth: self.scopes.len() - scope - 1,
+                slot,
+            })
+        } else {
+            None
+        };
+        if let Some(location) = location {
+            self.binding_cache[cache_index] = BindingCacheEntry {
+                key,
+                generation: self.binding_cache_generation,
+                location,
+            };
+        }
+        Some((scope, slot))
+    }
+    fn invalidate_binding_cache(&mut self) {
+        self.binding_cache_generation = self.binding_cache_generation.wrapping_add(1);
+        if self.binding_cache_generation == 0 {
+            self.binding_cache.fill(BindingCacheEntry::default());
+            self.binding_cache_generation = 1;
+        }
+    }
     fn binding_scope(&self, name: &str) -> Option<usize> {
         (0..self.scopes.len())
             .rev()
             .find(|scope| self.scopes[*scope].contains_key(name))
     }
     fn push(&mut self) {
-        self.scopes.push(HashMap::default())
+        self.scopes.push(Scope::default())
     }
     fn pop(&mut self) {
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| !scope.bindings.is_empty())
+        {
+            self.invalidate_binding_cache();
+        }
         self.scopes.pop();
     }
     fn error(
@@ -2236,6 +2782,38 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
         _ => unreachable!(),
     }
 }
+fn unary_math_operation(name: &str) -> Option<fn(f64) -> f64> {
+    Some(match name {
+        "abs" => f64::abs,
+        "floor" => f64::floor,
+        "ceil" => f64::ceil,
+        "sqrt" => f64::sqrt,
+        "sin" => f64::sin,
+        "cos" => f64::cos,
+        "tan" => f64::tan,
+        "asin" => f64::asin,
+        "acos" => f64::acos,
+        "atan" => f64::atan,
+        "log" => f64::ln,
+        "log10" => f64::log10,
+        "log2" => f64::log2,
+        "exp" => f64::exp,
+        "exp2" => f64::exp2,
+        "cbrt" => f64::cbrt,
+        "trunc" => f64::trunc,
+        "fract" => f64::fract,
+        "sinh" => f64::sinh,
+        "cosh" => f64::cosh,
+        "tanh" => f64::tanh,
+        "asinh" => f64::asinh,
+        "acosh" => f64::acosh,
+        "atanh" => f64::atanh,
+        "degrees" => f64::to_degrees,
+        "radians" => f64::to_radians,
+        _ => return None,
+    })
+}
+
 fn unary_math(
     n: &str,
     a: Vec<Value>,

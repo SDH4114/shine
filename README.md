@@ -183,7 +183,7 @@ cargo run -- run examples/statistics.shn
 
 ## Performance benchmark
 
-The repository includes checksum-validated equivalent workloads for Shine, Python, and C#:
+The repository includes checksum-validated equivalent workloads for Shine, Python, C#, and Rust:
 
 ```bash
 python3 benchmarks/run_benchmarks.py

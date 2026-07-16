@@ -32,6 +32,21 @@ def command_output(command: list[str]) -> str:
 def build() -> None:
     subprocess.run(["cargo", "build", "--release"], cwd=ROOT, check=True)
     subprocess.run(
+        [
+            "rustc",
+            "benchmarks/rust/benchmark.rs",
+            "--edition=2021",
+            "-C",
+            "opt-level=3",
+            "-C",
+            "codegen-units=1",
+            "-o",
+            "target/release/rust-benchmark",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
         ["dotnet", "build", "benchmarks/csharp/Benchmark.csproj", "-c", "Release", "--nologo"],
         cwd=ROOT,
         check=True,
@@ -119,9 +134,11 @@ def main() -> None:
     if not args.no_build:
         build()
 
+    rust_version = command_output(["rustc", "--version"]).split()[1]
     commands = {
         "Shine 0.1.3": [str(ROOT / "target/release/shine"), "run", "benchmarks/benchmark.shn"],
         f"Python {platform.python_version()}": [sys.executable, "benchmarks/benchmark.py"],
+        f"Rust {rust_version} Release": [str(ROOT / "target/release/rust-benchmark")],
         "C# .NET 10 Release": [
             "dotnet",
             "benchmarks/csharp/bin/Release/net10.0/Benchmark.dll",
