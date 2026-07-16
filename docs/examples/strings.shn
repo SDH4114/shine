@@ -1,0 +1,18 @@
+fn main() {
+    language = "Shine"
+    version = 0.1
+    values = [10, 20, 30]
+
+    message = "{language} {version}: mean={values.mean()}"
+    print(message)
+    print("First letter: {language[0]}")
+    print("Slice: {language[1..4]}")
+    print("Literal braces: {{value}}")
+    print("-" * 30)
+
+    multiline = """
+This is a multiline string.
+It keeps line breaks.
+"""
+    print(multiline)
+}

@@ -1,0 +1,8 @@
+fn main() {
+    values: List[Float] = [10.0, 20.0, 15.0, 40.0, 35.0]
+    print("Count: {values.len()}")
+    print("Sum: {values.sum()}")
+    print("Mean: {values.mean()}")
+    print("Minimum: {values.min()}")
+    print("Maximum: {values.max()}")
+}

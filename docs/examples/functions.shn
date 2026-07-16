@@ -1,0 +1,22 @@
+fn add(a: Number, b: Number): Number {
+    return a + b
+}
+
+fn factorial(n: Int): Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn minMax(values) {
+    return [values.min(), values.max()]
+}
+
+fn main() {
+    assert(add(10, 2.5) == 12.5)
+    assert(factorial(5) == 120)
+
+    [minimum, maximum] = minMax([4, 8, 2, 10])
+    print("minimum={minimum}, maximum={maximum}")
+}

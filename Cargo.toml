@@ -1,0 +1,16 @@
+[package]
+name = "shine-lang"
+version = "0.2.0"
+edition = "2021"
+description = "The Shine programming language"
+license = "MIT"
+
+[[bin]]
+name = "shine"
+path = "src/main.rs"
+
+[lib]
+name = "shine_lang"
+path = "src/lib.rs"
+
+[dependencies]

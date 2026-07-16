@@ -1,1 +1,161 @@
-# shine
+# Shine
+
+Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.2 adds a source manager, module graph, HIR linking, explicit exports, and real multi-file execution while the tree-walking evaluator remains the semantic reference backend.
+
+Полная русскоязычная документация: [docs/README.md](docs/README.md).
+
+```shine
+fn main() {
+    values: List[Float] = [10.0, 20.0, 15.0, 40.0]
+    print("Mean: {values.mean()}")
+}
+```
+
+## Install
+
+Rust 1.80 or newer is recommended. On macOS and Linux, use the installer so the
+`shine` command is available from every directory:
+
+```bash
+git clone <repository-url> shine
+cd shine
+chmod +x install.sh
+./install.sh
+shine version
+```
+
+The installer runs `cargo install`, then links the executable into a writable
+directory already present in `PATH` (for example `/opt/homebrew/bin`). If no
+such directory exists, it uses `~/.local/bin` and updates the current shell's
+startup file.
+
+If Shine was already installed with `cargo install --path .` but Zsh reports
+`command not found: shine`, repair the existing installation with:
+
+```bash
+ln -sf "$HOME/.cargo/bin/shine" /opt/homebrew/bin/shine
+hash -r
+shine version
+```
+
+For development without installation, replace `shine` with `cargo run --` in
+the commands below.
+
+## First project
+
+```bash
+shine new demo
+cd demo
+shine run src/main.shn
+```
+
+`shine new` resolves relative paths from the current directory, so the command
+can create a project in any folder where you have write permission.
+
+The generated project contains:
+
+```text
+demo/
+├── shine.toml
+├── src/
+│   └── main.shn
+└── tests/
+```
+
+## CLI
+
+```text
+shine new <project>     Create a project
+shine run <file.shn>    Run a program
+shine check <file.shn>  Check syntax, names, and fixed types
+shine build <file.shn>  Build target/shine/<name> plus its source bundle
+shine fmt <file.shn>    Format a source file in place
+shine test [project]    Run every tests/*.shn file
+shine help              Show command help
+shine version           Show the version
+```
+
+Projects can now use multiple modules:
+
+```shine
+import math as numbers
+from science.stats import mean
+
+fn main() {
+    print(numbers.square(12))
+}
+```
+
+Imported declarations must be marked with `export`. Module paths are resolved from the entry file's directory. See [modules and language evolution](docs/21-modules-and-language-evolution.md).
+
+`shine build` packages the current evaluator executable and either one neighboring `.shn` file or a `.shine-src` directory for a multi-module program. It is not optimized native compilation yet; the committed 1.0 direction is LLVM native AOT.
+
+## Language tour
+
+Variables are dynamic unless annotated. Constants cannot be reassigned or mutated.
+
+```shine
+value = 10
+value = "now text"
+
+age: Int = 16
+age = 17
+
+const point = [10, 20]
+[x, y] = point
+```
+
+Functions can optionally type their parameters and return value:
+
+```shine
+fn circleArea(radius: Float): Float {
+    return PI * radius ** 2
+}
+```
+
+Shine has one loop keyword with four forms:
+
+```shine
+loop { }
+loop condition { }
+loop item in values { }
+loop i in 0..10 step 2 { }
+```
+
+Lists support indexing, forward slicing, concatenation, repetition, and these methods:
+
+```text
+add  del  remove  have  index  len  clear  copy
+unique  reverse  sort  sum  min  max  mean
+```
+
+Math functions such as `sqrt`, `sin`, `log`, `round`, `min`, `max`, and `sum` are available without imports, as are `PI`, `E`, `INF`, and `NAN`. Console and text-file built-ins include `print`, `input`, `readFile`, and `writeFile`.
+
+Tests are ordinary programs using the built-in `assert` helper:
+
+```shine
+fn main() {
+    assert(2 ** 8 == 256.0, "powers should work")
+}
+```
+
+## Comments and integer division
+
+Both comments and integer division use `//` in the master specification. To keep tokenization predictable in this MVP, a `//` at the beginning of a logical line is a comment; inside an expression it is integer division. Put comments on their own line.
+
+```shine
+// This is a comment.
+result = 10 // 3
+```
+
+Semicolons are optional. Braces define blocks; indentation is formatting only. Strings support `{expression}` interpolation and triple-quoted multiline text.
+
+## Development
+
+```bash
+cargo fmt --all --check
+cargo test
+cargo run -- run examples/statistics.shn
+```
+
+The current implementation still excludes Web, GUI, classes, async, package management, scientific arrays, and LLVM code generation. Their committed syntax and architecture are documented in [shine-master-specification.md](shine-master-specification.md); roadmap items are not presented as implemented features.

@@ -1,0 +1,37 @@
+fn main() {
+    count = 0
+    loop {
+        count += 1
+        if count == 2 {
+            break
+        }
+    }
+
+    loop count < 4 {
+        count += 1
+    }
+
+    names = ""
+    loop name in ["A", "B", "C"] {
+        names = names + name
+    }
+
+    even = []
+    loop i in 0..10 step 2 {
+        even.add(i)
+    }
+
+    descending = []
+    loop i in 5..0 step -1 {
+        if i == 3 {
+            continue
+        }
+        descending.add(i)
+    }
+
+    assert(count == 4)
+    assert(names == "ABC")
+    assert(even == [0, 2, 4, 6, 8])
+    assert(descending == [5, 4, 2, 1])
+    print("All loop forms work")
+}

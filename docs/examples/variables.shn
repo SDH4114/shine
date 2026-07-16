@@ -1,0 +1,19 @@
+const APP_NAME: String = "Shine Variables"
+
+fn main() {
+    value = 10
+    value = "dynamic"
+
+    age: Int = 16
+    age = 17
+
+    measurement: Number = 10
+    measurement = 10.5
+
+    const POINT = [10, 20]
+    [x, y] = POINT
+
+    print(APP_NAME)
+    print("value={value}, age={age}, measurement={measurement}")
+    print("point=({x}, {y})")
+}
