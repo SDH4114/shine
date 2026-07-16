@@ -1,13 +1,37 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    collections::HashMap,
+    collections::HashMap as StdHashMap,
     fmt,
+    hash::{BuildHasherDefault, Hasher},
     io::{self, Write},
     rc::Rc,
 };
 
 use crate::{ast::*, diagnostics::Diagnostic, lexer::Lexer, parser::Parser, token::Span};
+
+struct FnvHasher(u64);
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Hasher for FnvHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<FnvHasher>>;
 
 #[derive(Clone)]
 pub enum Value {
@@ -178,7 +202,7 @@ pub struct Evaluator<'a> {
 
 impl<'a> Evaluator<'a> {
     pub fn new(source: &'a str, file: &'a str, output: bool) -> Self {
-        let mut global = HashMap::new();
+        let mut global = HashMap::default();
         for (name, value) in [
             ("PI", Value::Float(std::f64::consts::PI)),
             ("TAU", Value::Float(std::f64::consts::TAU)),
@@ -200,7 +224,7 @@ impl<'a> Evaluator<'a> {
             source,
             file,
             output,
-            scopes: vec![global, HashMap::new()],
+            scopes: vec![global, HashMap::default()],
             call_depth: 0,
             class_stack: vec![],
         }
@@ -288,7 +312,7 @@ impl<'a> Evaluator<'a> {
             } = s
             {
                 let mut fields = vec![];
-                let mut methods = HashMap::new();
+                let mut methods = HashMap::default();
                 let mut names = std::collections::HashSet::new();
                 for member in members {
                     let member_name = match member {
@@ -513,7 +537,8 @@ impl<'a> Evaluator<'a> {
                 step,
             } => {
                 let iterable = self.eval(iterable)?;
-                let values = match iterable {
+                self.push();
+                let result = match iterable {
                     Value::Range(a, z) => {
                         let step = if let Some(e) = step {
                             as_int(self.eval(e)?, e.span(), self)?
@@ -531,54 +556,101 @@ impl<'a> Evaluator<'a> {
                                 "Use a positive or negative integer step.",
                             ));
                         }
-                        let mut values = vec![];
-                        let mut i = a;
-                        if step > 0 {
-                            while i < z {
-                                values.push(Value::Int(i));
-                                i = i.checked_add(step).ok_or_else(|| {
-                                    self.error(
-                                        "Value Error",
-                                        "range overflow",
-                                        span,
-                                        "The range exceeded Int limits.",
-                                        "Use a smaller range.",
-                                    )
-                                })?
-                            }
-                        } else {
-                            while i > z {
-                                values.push(Value::Int(i));
-                                i = i.checked_add(step).ok_or_else(|| {
-                                    self.error(
-                                        "Value Error",
-                                        "range overflow",
-                                        span,
-                                        "The range exceeded Int limits.",
-                                        "Use a smaller range.",
-                                    )
-                                })?
-                            }
-                        }
-                        values
+                        self.exec_range_values(name, a, z, step, b, span)
                     }
-                    Value::List(v, _) => v.borrow().clone(),
-                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-                    v => return Err(self.type_error(span, "an iterable", &v)),
+                    Value::List(values, _) => {
+                        let values = values.borrow().clone();
+                        self.exec_for_values(name, values, b, span)
+                    }
+                    Value::String(value) => self.exec_for_values(
+                        name,
+                        value
+                            .chars()
+                            .map(|character| Value::String(character.to_string())),
+                        b,
+                        span,
+                    ),
+                    value => Err(self.type_error(span, "an iterable", &value)),
                 };
-                for value in values {
-                    self.push();
-                    self.define(name, value, None, false, span)?;
-                    let flow = self.exec_block(b)?;
-                    self.pop();
-                    match flow {
-                        Flow::Normal | Flow::Continue => {}
-                        Flow::Break => break,
-                        Flow::Return(v) => return Ok(Flow::Return(v)),
-                    }
+                self.pop();
+                if let Flow::Return(value) = result? {
+                    return Ok(Flow::Return(value));
                 }
             }
         }
+        Ok(Flow::Normal)
+    }
+
+    fn exec_range_values(
+        &mut self,
+        name: &str,
+        start: i64,
+        end: i64,
+        step: i64,
+        body: &Block,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let mut value = start;
+        while if step > 0 { value < end } else { value > end } {
+            match self.exec_for_iteration(name, Value::Int(value), body, span)? {
+                Flow::Normal | Flow::Continue => {}
+                Flow::Break => return Ok(Flow::Normal),
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+            }
+            value = value.checked_add(step).ok_or_else(|| {
+                self.error(
+                    "Value Error",
+                    "range overflow",
+                    span,
+                    "The range exceeded Int limits.",
+                    "Use a smaller range.",
+                )
+            })?;
+        }
+        Ok(Flow::Normal)
+    }
+
+    fn exec_for_values(
+        &mut self,
+        name: &str,
+        values: impl IntoIterator<Item = Value>,
+        body: &Block,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        for value in values {
+            match self.exec_for_iteration(name, value, body, span)? {
+                Flow::Normal | Flow::Continue => {}
+                Flow::Break => return Ok(Flow::Normal),
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+            }
+        }
+        Ok(Flow::Normal)
+    }
+
+    fn exec_for_iteration(
+        &mut self,
+        name: &str,
+        value: Value,
+        body: &Block,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let loop_scope = self.scopes.len() - 1;
+        self.scopes[loop_scope].clear();
+        self.scopes[loop_scope].insert(
+            name.into(),
+            Binding {
+                value,
+                ty: None,
+                constant: false,
+            },
+        );
+        for statement in &body.statements {
+            let flow = self.exec(statement)?;
+            if !matches!(flow, Flow::Normal) {
+                return Ok(flow);
+            }
+        }
+        let _ = span;
         Ok(Flow::Normal)
     }
 
@@ -604,16 +676,19 @@ impl<'a> Evaluator<'a> {
                             return Err(self.error("Name Error",format!("variable `{name}` is already defined"),*name_span,"A variable cannot be declared twice in the same visible scope.","Choose another name or reassign without `const` or a type annotation."));
                         }
                         self.define(name, value, ty, constant, *name_span)
-                    } else if self.get(name).is_some() {
-                        self.reassign(name, value, *name_span)
+                    } else if let Some(scope) = self.binding_scope(name) {
+                        self.reassign_in_scope(scope, name, value, *name_span)
                     } else {
                         self.define(name, value, ty, constant, *name_span)
                     }
                 } else {
-                    let old = self
-                        .get(name)
-                        .ok_or_else(|| self.unknown(name, *name_span))?
-                        .value;
+                    let scope = self
+                        .binding_scope(name)
+                        .ok_or_else(|| self.unknown(name, *name_span))?;
+                    if self.try_compound_numeric(scope, name, op, &value, *name_span)? {
+                        return Ok(());
+                    }
+                    let old = self.scopes[scope].get(name).unwrap().value.clone();
                     let v = self.binary(
                         old,
                         match op {
@@ -626,7 +701,7 @@ impl<'a> Evaluator<'a> {
                         value,
                         span,
                     )?;
-                    self.reassign(name, v, *name_span)
+                    self.reassign_in_scope(scope, name, v, *name_span)
                 }
             }
             AssignTarget::Destructure(names, target_span) => {
@@ -648,8 +723,8 @@ impl<'a> Evaluator<'a> {
                     ));
                 }
                 for (name, v) in names.iter().zip(values.iter()) {
-                    if self.get(name).is_some() {
-                        self.reassign(name, v.clone(), *target_span)?
+                    if let Some(scope) = self.binding_scope(name) {
+                        self.reassign_in_scope(scope, name, v.clone(), *target_span)?
                     } else {
                         self.define(name, v.clone(), None, constant, *target_span)?
                     }
@@ -1129,7 +1204,7 @@ impl<'a> Evaluator<'a> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, Diagnostic> {
-        let mut fields = HashMap::new();
+        let mut fields = HashMap::default();
         for field in &class.fields {
             fields.insert(field.name.clone(), self.eval(&field.value)?);
         }
@@ -1659,26 +1734,88 @@ impl<'a> Evaluator<'a> {
         );
         Ok(())
     }
-    fn reassign(&mut self, n: &str, v: Value, span: Span) -> Result<(), Diagnostic> {
-        for i in (0..self.scopes.len()).rev() {
-            if let Some(b) = self.scopes[i].get(n).cloned() {
-                if b.constant {
-                    return Err(self.error(
-                        "Const Error",
-                        format!("cannot reassign constant `{n}`"),
-                        span,
-                        "Constants cannot be reassigned or mutated.",
-                        "Create a new variable instead.",
-                    ));
-                }
-                if let Some(t) = &b.ty {
-                    self.ensure_type(&v, t, span)?
-                }
-                self.scopes[i].get_mut(n).unwrap().value = v;
-                return Ok(());
-            }
+    fn reassign_in_scope(
+        &mut self,
+        scope: usize,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let (constant, ty) = {
+            let binding = self.scopes[scope].get(name).unwrap();
+            (binding.constant, binding.ty.clone())
+        };
+        if constant {
+            return Err(self.error(
+                "Const Error",
+                format!("cannot reassign constant `{name}`"),
+                span,
+                "Constants cannot be reassigned or mutated.",
+                "Create a new variable instead.",
+            ));
         }
-        Err(self.unknown(n, span))
+        if let Some(ty) = &ty {
+            self.ensure_type(&value, ty, span)?;
+        }
+        self.scopes[scope].get_mut(name).unwrap().value = value;
+        Ok(())
+    }
+    fn try_compound_numeric(
+        &mut self,
+        scope: usize,
+        name: &str,
+        operation: AssignOp,
+        right: &Value,
+        span: Span,
+    ) -> Result<bool, Diagnostic> {
+        if self.scopes[scope].get(name).unwrap().constant {
+            return Err(self.error(
+                "Const Error",
+                format!("cannot reassign constant `{name}`"),
+                span,
+                "Constants cannot be reassigned or mutated.",
+                "Create a new variable instead.",
+            ));
+        }
+        let binding = self.scopes[scope].get_mut(name).unwrap();
+        let optimized = match (&mut binding.value, operation, right) {
+            (Value::Int(left), AssignOp::Add, Value::Int(right)) => {
+                *left = left
+                    .checked_add(*right)
+                    .ok_or_else(|| integer_overflow(span, self.file, self.source))?;
+                true
+            }
+            (Value::Int(left), AssignOp::Subtract, Value::Int(right)) => {
+                *left = left
+                    .checked_sub(*right)
+                    .ok_or_else(|| integer_overflow(span, self.file, self.source))?;
+                true
+            }
+            (Value::Int(left), AssignOp::Multiply, Value::Int(right)) => {
+                *left = left
+                    .checked_mul(*right)
+                    .ok_or_else(|| integer_overflow(span, self.file, self.source))?;
+                true
+            }
+            (Value::Float(left), AssignOp::Add, Value::Float(right)) => {
+                *left += right;
+                true
+            }
+            (Value::Float(left), AssignOp::Subtract, Value::Float(right)) => {
+                *left -= right;
+                true
+            }
+            (Value::Float(left), AssignOp::Multiply, Value::Float(right)) => {
+                *left *= right;
+                true
+            }
+            (Value::Float(left), AssignOp::Divide, Value::Float(right)) if *right != 0.0 => {
+                *left /= right;
+                true
+            }
+            _ => false,
+        };
+        Ok(optimized)
     }
     fn ensure_type(&self, v: &Value, t: &TypeRef, span: Span) -> Result<(), Diagnostic> {
         let good = match t {
@@ -1716,10 +1853,18 @@ impl<'a> Evaluator<'a> {
         }
     }
     fn get(&self, n: &str) -> Option<Binding> {
-        self.scopes.iter().rev().find_map(|s| s.get(n).cloned())
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(n).cloned())
+    }
+    fn binding_scope(&self, name: &str) -> Option<usize> {
+        (0..self.scopes.len())
+            .rev()
+            .find(|scope| self.scopes[*scope].contains_key(name))
     }
     fn push(&mut self) {
-        self.scopes.push(HashMap::new())
+        self.scopes.push(HashMap::default())
     }
     fn pop(&mut self) {
         self.scopes.pop();
@@ -2178,4 +2323,16 @@ fn integer_pair_math(
             "Use smaller integers.",
         )
     })
+}
+
+fn integer_overflow(span: Span, file: &str, source: &str) -> Diagnostic {
+    Diagnostic::at(
+        "Value Error",
+        "integer overflow",
+        file,
+        source,
+        span,
+        "This result is outside Int limits.",
+        "Use a Float or smaller values.",
+    )
 }

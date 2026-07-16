@@ -470,3 +470,11 @@ fn main() {
     .unwrap_err();
     assert_eq!(constant_object.category, "Const Error");
 }
+
+#[test]
+fn optimized_compound_math_preserves_overflow_diagnostics() {
+    let source = "value = 9_223_372_036_854_775_807\nvalue += 1\n";
+    let error = run_source(source, "compound-overflow.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
+    assert!(error.message.contains("integer overflow"));
+}
