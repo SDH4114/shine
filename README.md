@@ -1,6 +1,6 @@
 # Shine
 
-Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model. The runtime keeps the tree-walking evaluator as its semantic fallback and automatically uses a compact numeric VM for typed numeric functions and integer-list hot paths.
+Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model. The runtime keeps the tree-walking evaluator as its semantic fallback and automatically uses a compact numeric VM for scalar arithmetic, comparisons, branches, all loop forms, helper-function calls, and typed `Int`/`Float` list workloads.
 
 Полная русскоязычная документация: [docs/README.md](docs/README.md).
 

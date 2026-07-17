@@ -1,0 +1,43 @@
+// Branch-heavy and nested-loop workload for the general numeric runtime.
+// The checksum makes optimizer mistakes visible.
+
+const BRANCH_ITERATIONS = 1_000_000
+const GCD_ITERATIONS = 100_000
+
+fn branchWork(limit: Int): Int {
+    state = 17
+    checksum = 0
+    i = 0
+    loop i < limit {
+        state = (state * 48_271 + i) % 2_147_483_647
+        if state % 2 == 0 {
+            checksum = (checksum + state) % 9_223_372_036_854_775_000
+        } else if state % 3 == 0 {
+            checksum = (checksum - state) % 9_223_372_036_854_775_000
+        } else {
+            checksum = (checksum + state // 7) % 9_223_372_036_854_775_000
+        }
+        i += 1
+    }
+    return checksum
+}
+
+fn gcdWork(limit: Int): Int {
+    checksum = 0
+    loop i in 1..limit {
+        left = 982_451_653 + i * 17
+        right = 961_748_941 - i * 13
+        loop right != 0 {
+            remainder = left % right
+            left = right
+            right = remainder
+        }
+        checksum += left
+    }
+    return checksum
+}
+
+fn main() {
+    print("branch={branchWork(BRANCH_ITERATIONS)}")
+    print("gcd={gcdWork(GCD_ITERATIONS)}")
+}

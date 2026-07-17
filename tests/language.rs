@@ -31,6 +31,8 @@ fn main() {
     x = 2.5
     values = [3, 1, 3, 2]
     assert(values.unique() == [3, 1, 2])
+    assert([1, 1.0, 2.5, 2.5, NAN, NAN, "x", "x"].unique().len() == 5)
+    assert([9_007_199_254_740_993, 9_007_199_254_740_992.0].unique().len() == 2)
     values.sort()
     assert(values == [1, 2, 3, 3])
     assert(values.sum() == 9)
@@ -584,6 +586,151 @@ fn main() {
 "#;
     check_source(source, "numeric-hot-path.shn").unwrap();
     run_source(source, "numeric-hot-path.shn").unwrap();
+}
+
+#[test]
+fn numeric_vm_handles_control_flow_calls_booleans_and_float_lists() {
+    let source = r#"
+fn scale(value: Int): Int {
+    const factor = 3
+    return value * factor
+}
+
+fn branch_work(limit: Int, enabled: Bool): Int {
+    if not enabled { return 0 }
+    total = 0
+    i = 0
+    loop i < limit {
+        if i % 2 == 0 {
+            total += scale(i)
+        } else {
+            total -= i
+        }
+        i += 1
+    }
+    return total
+}
+
+fn list_work(): Float {
+    values: List[Float] = []
+    values.add(3.0, 1.5, 2.0)
+    values.sort()
+    values[1] = 4.0
+    total = 0.0
+    loop value in values { total += value }
+    return total + values.mean() + values.len()
+}
+
+fn constant_list_work(): Float {
+    const values = [1.5, 2.5, 3.0]
+    return values.sum()
+}
+
+fn main() {
+    assert(branch_work(10, true) == 35)
+    assert(branch_work(10, false) == 0)
+    assert(round(list_work(), 6) == 14.333333)
+    assert(constant_list_work() == 7.0)
+}
+"#;
+    check_source(source, "general-numeric-vm.shn").unwrap();
+    run_source(source, "general-numeric-vm.shn").unwrap();
+}
+
+#[test]
+fn numeric_comparisons_do_not_lose_large_integer_precision() {
+    let source = r#"
+fn is_larger(value: Int): Bool {
+    return value > 9_007_199_254_740_992.0 and value != 9_007_199_254_740_992.0
+}
+
+fn main() {
+    assert(9_007_199_254_740_993 != 9_007_199_254_740_992.0)
+    assert(9_007_199_254_740_993 > 9_007_199_254_740_992.0)
+    assert(9_007_199_254_740_992 == 9_007_199_254_740_992.0)
+    assert(is_larger(9_007_199_254_740_993))
+}
+"#;
+    run_source(source, "exact-comparisons.shn").unwrap();
+}
+
+#[test]
+fn numeric_aggregates_use_stable_float_algorithms() {
+    let source = r#"
+fn stable_sum(): Float {
+    values: List[Float] = [10_000_000_000_000_000.0, 1.0, -10_000_000_000_000_000.0]
+    return values.sum()
+}
+
+fn main() {
+    values: List[Float] = [10_000_000_000_000_000.0, 1.0, -10_000_000_000_000_000.0]
+    assert(sum(values) == 1.0)
+    assert(stable_sum() == 1.0)
+}
+"#;
+    run_source(source, "stable-aggregates.shn").unwrap();
+}
+
+#[test]
+fn numeric_vm_runs_nested_matrix_style_programs() {
+    let source = r#"
+fn matrix_checksum(size: Int): Float {
+    left: List[Float] = []
+    identity: List[Float] = []
+    output: List[Float] = []
+
+    loop row in 0..size {
+        loop column in 0..size {
+            left.add((row * size + column + 1) * 1.0)
+            if row == column { identity.add(1.0) } else { identity.add(0.0) }
+            output.add(0.0)
+        }
+    }
+
+    loop row in 0..size {
+        loop column in 0..size {
+            value = 0.0
+            loop inner in 0..size {
+                value += left[row * size + inner] * identity[inner * size + column]
+            }
+            output[row * size + column] = value
+        }
+    }
+    return output.sum()
+}
+
+fn main() { assert(matrix_checksum(3) == 45.0) }
+"#;
+    check_source(source, "matrix-vm.shn").unwrap();
+    run_source(source, "matrix-vm.shn").unwrap();
+}
+
+#[test]
+fn unsafe_numeric_edge_cases_return_diagnostics() {
+    let constant = r#"
+fn invalid(): Int {
+    const value = 1
+    value = 2
+    return value
+}
+invalid()
+"#;
+    let error = run_source(constant, "numeric-const.shn").unwrap_err();
+    assert_eq!(error.category, "Const Error");
+
+    let remainder = r#"
+fn remainder(): Int { return (-9_223_372_036_854_775_807 - 1) % -1 }
+remainder()
+"#;
+    let error = run_source(remainder, "remainder-overflow.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
+    assert!(error.message.contains("overflow"));
+
+    let error = run_source("round(INF)\n", "round-overflow.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
+
+    let error = run_source("round(1.0, 400)\n", "round-scale.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
 }
 
 #[cfg(unix)]

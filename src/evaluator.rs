@@ -13,8 +13,9 @@ use crate::{
     diagnostics::Diagnostic,
     lexer::Lexer,
     numeric_vm::{
-        self, FloatExpr as VmFloatExpr, IntExpr as VmIntExpr, NumericFunction, NumericParameter,
-        NumericStmt,
+        self, BoolExpr as VmBoolExpr, CompareOp as VmCompareOp, FloatExpr as VmFloatExpr,
+        FloatListOp, IntExpr as VmIntExpr, IntListOp, NumericCall, NumericFunction, NumericListRef,
+        NumericParameter, NumericStmt, NumericValueExpr,
     },
     parser::Parser,
     token::Span,
@@ -55,6 +56,15 @@ pub enum Value {
     Function(Rc<FunctionValue>),
     Class(Rc<ClassValue>),
     Instance(Rc<RefCell<InstanceValue>>, bool),
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum ScalarKey {
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    String(String),
 }
 
 #[derive(Clone)]
@@ -197,8 +207,12 @@ impl PartialEq for Value {
                 (Value::Bool(a), Value::Bool(b)) => a == b,
                 (Value::Int(a), Value::Int(b)) => a == b,
                 (Value::Float(a), Value::Float(b)) => a == b,
-                (Value::Int(a), Value::Float(b)) => *a as f64 == *b,
-                (Value::Float(a), Value::Int(b)) => *a == *b as f64,
+                (Value::Int(a), Value::Float(b)) => {
+                    compare_int_float_exact(*a, *b) == Some(Ordering::Equal)
+                }
+                (Value::Float(a), Value::Int(b)) => {
+                    compare_int_float_exact(*b, *a) == Some(Ordering::Equal)
+                }
                 (Value::String(a), Value::String(b)) => a == b,
                 (Value::List(..), Value::List(..)) => {
                     unreachable!("lists are handled before scalar equality")
@@ -317,6 +331,47 @@ enum Flow {
 enum NumericFlow {
     Normal,
     Return(Value),
+    Break,
+    Continue,
+}
+
+#[derive(Default)]
+struct NumericFrame {
+    integers: Vec<i64>,
+    floats: Vec<f64>,
+    bools: Vec<bool>,
+    int_lists: Vec<Vec<i64>>,
+    float_lists: Vec<Vec<f64>>,
+}
+
+impl NumericFrame {
+    fn prepare(&mut self, function: &NumericFunction) {
+        self.integers.resize(function.int_locals, 0);
+        self.integers.fill(0);
+        self.floats.resize(function.float_locals, 0.0);
+        self.floats.fill(0.0);
+        self.bools.resize(function.bool_locals, false);
+        self.bools.fill(false);
+
+        self.int_lists
+            .resize_with(function.int_list_locals, Vec::new);
+        self.int_lists.truncate(function.int_list_locals);
+        for list in &mut self.int_lists {
+            list.clear();
+        }
+        self.float_lists
+            .resize_with(function.float_list_locals, Vec::new);
+        self.float_lists.truncate(function.float_list_locals);
+        for list in &mut self.float_lists {
+            list.clear();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NumericNumber {
+    Int(i64),
+    Float(f64),
 }
 
 pub struct Evaluator<'a> {
@@ -327,6 +382,7 @@ pub struct Evaluator<'a> {
     binding_cache: Vec<BindingCacheEntry>,
     binding_cache_generation: u64,
     frame_bases: Vec<usize>,
+    numeric_frame_pool: Vec<NumericFrame>,
     call_depth: usize,
     class_stack: Vec<String>,
 }
@@ -359,6 +415,7 @@ impl<'a> Evaluator<'a> {
             binding_cache: vec![BindingCacheEntry::default(); BINDING_CACHE_SIZE],
             binding_cache_generation: 1,
             frame_bases: vec![2],
+            numeric_frame_pool: vec![],
             call_depth: 0,
             class_stack: vec![],
         }
@@ -419,7 +476,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn register_functions(&mut self, p: &Program) -> Result<(), Diagnostic> {
-        let numeric_globals = numeric_vm::collect_global_types(p);
+        let numeric_environment = numeric_vm::collect_environment(p);
         for s in &p.statements {
             if let Stmt::Function {
                 name,
@@ -430,7 +487,7 @@ impl<'a> Evaluator<'a> {
             } = s
             {
                 let numeric =
-                    numeric_vm::compile_function(params, body, &numeric_globals).map(Rc::new);
+                    numeric_vm::compile_function(params, body, &numeric_environment).map(Rc::new);
                 self.define(
                     name,
                     Value::Function(Rc::new(FunctionValue {
@@ -653,13 +710,26 @@ impl<'a> Evaluator<'a> {
     }
     fn exec_loop(&mut self, k: &LoopKind, b: &Block, span: Span) -> Result<Flow, Diagnostic> {
         match k {
-            LoopKind::Forever => loop {
-                match self.exec_block(b)? {
-                    Flow::Normal | Flow::Continue => {}
-                    Flow::Break => break,
-                    Flow::Return(v) => return Ok(Flow::Return(v)),
+            LoopKind::Forever => {
+                let mut guard = 0usize;
+                loop {
+                    if guard >= MAX_LOOP_ITERATIONS {
+                        return Err(self.error(
+                            "Runtime Error",
+                            "loop iteration limit exceeded",
+                            span,
+                            "The loop ran more than ten million times.",
+                            "Add a break condition or split the work into batches.",
+                        ));
+                    }
+                    guard += 1;
+                    match self.exec_block(b)? {
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => break,
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                    }
                 }
-            },
+            }
             LoopKind::While(c) => {
                 let mut guard = 0usize;
                 while self.eval(c)?.truthy() {
@@ -1380,10 +1450,17 @@ impl<'a> Evaluator<'a> {
                         Ok(values[i].clone())
                     }
                     Value::String(v) => {
-                        let chars: Vec<_> = v.chars().collect();
-                        let i = normalize_index(idx, chars.len())
-                            .ok_or_else(|| self.index_error(*span, idx, chars.len()))?;
-                        Ok(Value::String(chars[i].to_string()))
+                        if idx >= 0 {
+                            if let Ok(index) = usize::try_from(idx) {
+                                if let Some(character) = v.chars().nth(index) {
+                                    return Ok(Value::String(character.to_string()));
+                                }
+                            }
+                        }
+                        let len = v.chars().count();
+                        let i = normalize_index(idx, len)
+                            .ok_or_else(|| self.index_error(*span, idx, len))?;
+                        Ok(Value::String(v.chars().nth(i).unwrap().to_string()))
                     }
                     v => Err(self.type_error(*span, "a List or String", &v)),
                 }
@@ -1582,7 +1659,15 @@ impl<'a> Evaluator<'a> {
                     if b == 0 {
                         Err(self.zero(span))
                     } else {
-                        Ok(Value::Int(a % b))
+                        a.checked_rem(b).map(Value::Int).ok_or_else(|| {
+                            self.error(
+                                "Value Error",
+                                "integer overflow",
+                                span,
+                                "The remainder result is outside Int limits.",
+                                "Use Float values or smaller numbers.",
+                            )
+                        })
                     }
                 }
                 (a, b) => {
@@ -1684,7 +1769,7 @@ impl<'a> Evaluator<'a> {
         self.call_depth += 1;
         let result = if receiver.is_none() && owner.is_none() {
             if let Some(numeric) = &f.numeric {
-                self.call_numeric_function(numeric, args)
+                self.call_numeric_function(numeric, &args)
             } else {
                 self.call_ast_function(&f, args, receiver, owner, span)
             }
@@ -1759,28 +1844,28 @@ impl<'a> Evaluator<'a> {
     fn call_numeric_function(
         &mut self,
         function: &NumericFunction,
-        args: Vec<Value>,
+        args: &[Value],
     ) -> Result<Value, Diagnostic> {
-        let mut integers = vec![0; function.int_locals];
-        let mut floats = vec![0.0; function.float_locals];
-        let mut int_lists = (0..function.int_list_locals)
-            .map(|_| Vec::<i64>::new())
-            .collect::<Vec<_>>();
+        let mut frame = self.numeric_frame_pool.pop().unwrap_or_default();
+        frame.prepare(function);
         for (parameter, value) in function.parameters.iter().zip(args) {
             match (parameter, value) {
-                (NumericParameter::Int(slot), Value::Int(value)) => integers[*slot] = value,
-                (NumericParameter::Float(slot), Value::Float(value)) => floats[*slot] = value,
+                (NumericParameter::Int(slot), Value::Int(value)) => frame.integers[*slot] = *value,
+                (NumericParameter::Float(slot), Value::Float(value)) => {
+                    frame.floats[*slot] = *value
+                }
+                (NumericParameter::Bool(slot), Value::Bool(value)) => frame.bools[*slot] = *value,
                 _ => unreachable!("numeric function parameters were checked before execution"),
             }
         }
-        match self.exec_numeric_statements(
-            &function.statements,
-            &mut integers,
-            &mut floats,
-            &mut int_lists,
-        )? {
+        let execution = self.exec_numeric_statements(&function.statements, &mut frame);
+        self.numeric_frame_pool.push(frame);
+        match execution? {
             NumericFlow::Normal => Ok(Value::None),
             NumericFlow::Return(value) => Ok(value),
+            NumericFlow::Break | NumericFlow::Continue => {
+                unreachable!("numeric compiler rejects loop control outside loops")
+            }
         }
     }
 
@@ -1788,31 +1873,127 @@ impl<'a> Evaluator<'a> {
     fn exec_numeric_statements(
         &mut self,
         statements: &[NumericStmt],
-        integers: &mut [i64],
-        floats: &mut [f64],
-        int_lists: &mut [Vec<i64>],
+        frame: &mut NumericFrame,
     ) -> Result<NumericFlow, Diagnostic> {
         for statement in statements {
             match statement {
                 NumericStmt::SetInt(slot, expression) => {
-                    integers[*slot] = self.eval_numeric_int(expression, integers, int_lists)?;
+                    frame.integers[*slot] = self.eval_numeric_int(expression, frame)?;
                 }
                 NumericStmt::SetFloat(slot, expression) => {
-                    floats[*slot] =
-                        self.eval_numeric_float(expression, integers, floats, int_lists)?;
+                    frame.floats[*slot] = self.eval_numeric_float(expression, frame)?;
+                }
+                NumericStmt::SetBool(slot, expression) => {
+                    frame.bools[*slot] = self.eval_numeric_bool(expression, frame)?;
                 }
                 NumericStmt::EvalInt(expression) => {
-                    self.eval_numeric_int(expression, integers, int_lists)?;
+                    self.eval_numeric_int(expression, frame)?;
                 }
                 NumericStmt::EvalFloat(expression) => {
-                    self.eval_numeric_float(expression, integers, floats, int_lists)?;
+                    self.eval_numeric_float(expression, frame)?;
                 }
-                NumericStmt::CreateIntList(slot) => int_lists[*slot].clear(),
-                NumericStmt::AddIntList(slot, expression) => {
-                    let value = self.eval_numeric_int(expression, integers, int_lists)?;
-                    int_lists[*slot].push(value);
+                NumericStmt::EvalBool(expression) => {
+                    self.eval_numeric_bool(expression, frame)?;
                 }
-                NumericStmt::SortIntList(slot) => int_lists[*slot].sort_unstable(),
+                NumericStmt::SetIntList(slot, expressions) => {
+                    let mut values = Vec::with_capacity(expressions.len());
+                    for expression in expressions {
+                        values.push(self.eval_numeric_int(expression, frame)?);
+                    }
+                    frame.int_lists[*slot] = values;
+                }
+                NumericStmt::SetFloatList(slot, expressions) => {
+                    let mut values = Vec::with_capacity(expressions.len());
+                    for expression in expressions {
+                        values.push(self.eval_numeric_float(expression, frame)?);
+                    }
+                    frame.float_lists[*slot] = values;
+                }
+                NumericStmt::AddIntList(slot, expressions) => {
+                    let mut values = Vec::with_capacity(expressions.len());
+                    for expression in expressions {
+                        values.push(self.eval_numeric_int(expression, frame)?);
+                    }
+                    frame.int_lists[*slot].extend(values);
+                }
+                NumericStmt::AddFloatList(slot, expressions) => {
+                    let mut values = Vec::with_capacity(expressions.len());
+                    for expression in expressions {
+                        values.push(self.eval_numeric_float(expression, frame)?);
+                    }
+                    frame.float_lists[*slot].extend(values);
+                }
+                NumericStmt::SetIntListIndex(slot, index, value, span) => {
+                    let index = self.eval_numeric_int(index, frame)?;
+                    let value = self.eval_numeric_int(value, frame)?;
+                    let len = frame.int_lists[*slot].len();
+                    let Some(index) = normalize_index(index, len) else {
+                        return Err(self.index_error(*span, index, len));
+                    };
+                    frame.int_lists[*slot][index] = value;
+                }
+                NumericStmt::SetFloatListIndex(slot, index, value, span) => {
+                    let index = self.eval_numeric_int(index, frame)?;
+                    let value = self.eval_numeric_float(value, frame)?;
+                    let len = frame.float_lists[*slot].len();
+                    let Some(index) = normalize_index(index, len) else {
+                        return Err(self.index_error(*span, index, len));
+                    };
+                    frame.float_lists[*slot][index] = value;
+                }
+                NumericStmt::SortIntList(slot) => frame.int_lists[*slot].sort_unstable(),
+                NumericStmt::SortFloatList(slot) => frame.float_lists[*slot]
+                    .sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal)),
+                NumericStmt::ReverseIntList(slot) => frame.int_lists[*slot].reverse(),
+                NumericStmt::ReverseFloatList(slot) => frame.float_lists[*slot].reverse(),
+                NumericStmt::ClearIntList(slot) => frame.int_lists[*slot].clear(),
+                NumericStmt::ClearFloatList(slot) => frame.float_lists[*slot].clear(),
+                NumericStmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    let branch = if self.eval_numeric_bool(condition, frame)? {
+                        then_body
+                    } else {
+                        else_body
+                    };
+                    match self.exec_numeric_statements(branch, frame)? {
+                        NumericFlow::Normal => {}
+                        flow => return Ok(flow),
+                    }
+                }
+                NumericStmt::Loop {
+                    condition,
+                    body,
+                    span,
+                } => {
+                    let mut iterations = 0usize;
+                    loop {
+                        if let Some(condition) = condition {
+                            if !self.eval_numeric_bool(condition, frame)? {
+                                break;
+                            }
+                        }
+                        if iterations >= MAX_LOOP_ITERATIONS {
+                            return Err(self.error(
+                                "Runtime Error",
+                                "loop iteration limit exceeded",
+                                *span,
+                                "The loop ran more than ten million times.",
+                                "Check that the loop can finish.",
+                            ));
+                        }
+                        iterations += 1;
+                        match self.exec_numeric_statements(body, frame)? {
+                            NumericFlow::Normal | NumericFlow::Continue => {}
+                            NumericFlow::Break => break,
+                            NumericFlow::Return(value) => {
+                                return Ok(NumericFlow::Return(value));
+                            }
+                        }
+                    }
+                }
                 NumericStmt::ForRange {
                     variable,
                     start,
@@ -1821,11 +2002,11 @@ impl<'a> Evaluator<'a> {
                     body,
                     span,
                 } => {
-                    let mut value = self.eval_numeric_int(start, integers, int_lists)?;
+                    let mut value = self.eval_numeric_int(start, frame)?;
                     let mut iterations = 0usize;
-                    let end = self.eval_numeric_int(end, integers, int_lists)?;
+                    let end = self.eval_numeric_int(end, frame)?;
                     let step = if let Some(step) = step {
-                        self.eval_numeric_int(step, integers, int_lists)?
+                        self.eval_numeric_int(step, frame)?
                     } else if value <= end {
                         1
                     } else {
@@ -1851,11 +2032,13 @@ impl<'a> Evaluator<'a> {
                             ));
                         }
                         iterations += 1;
-                        integers[*variable] = value;
-                        if let NumericFlow::Return(value) =
-                            self.exec_numeric_statements(body, integers, floats, int_lists)?
-                        {
-                            return Ok(NumericFlow::Return(value));
+                        frame.integers[*variable] = value;
+                        match self.exec_numeric_statements(body, frame)? {
+                            NumericFlow::Normal | NumericFlow::Continue => {}
+                            NumericFlow::Break => break,
+                            NumericFlow::Return(value) => {
+                                return Ok(NumericFlow::Return(value));
+                            }
                         }
                         value = value.checked_add(step).ok_or_else(|| {
                             self.error(
@@ -1868,14 +2051,65 @@ impl<'a> Evaluator<'a> {
                         })?;
                     }
                 }
+                NumericStmt::ForIntList {
+                    variable,
+                    list,
+                    body,
+                    span,
+                } => {
+                    let values = frame.int_lists[*list].clone();
+                    for (iterations, value) in values.into_iter().enumerate() {
+                        if iterations >= MAX_LOOP_ITERATIONS {
+                            return Err(self.error(
+                                "Runtime Error",
+                                "loop iteration limit exceeded",
+                                *span,
+                                "The loop ran more than ten million times.",
+                                "Use a smaller iterable or split the work into batches.",
+                            ));
+                        }
+                        frame.integers[*variable] = value;
+                        match self.exec_numeric_statements(body, frame)? {
+                            NumericFlow::Normal | NumericFlow::Continue => {}
+                            NumericFlow::Break => break,
+                            NumericFlow::Return(value) => {
+                                return Ok(NumericFlow::Return(value));
+                            }
+                        }
+                    }
+                }
+                NumericStmt::ForFloatList {
+                    variable,
+                    list,
+                    body,
+                    span,
+                } => {
+                    let values = frame.float_lists[*list].clone();
+                    for (iterations, value) in values.into_iter().enumerate() {
+                        if iterations >= MAX_LOOP_ITERATIONS {
+                            return Err(self.error(
+                                "Runtime Error",
+                                "loop iteration limit exceeded",
+                                *span,
+                                "The loop ran more than ten million times.",
+                                "Use a smaller iterable or split the work into batches.",
+                            ));
+                        }
+                        frame.floats[*variable] = value;
+                        match self.exec_numeric_statements(body, frame)? {
+                            NumericFlow::Normal | NumericFlow::Continue => {}
+                            NumericFlow::Break => break,
+                            NumericFlow::Return(value) => {
+                                return Ok(NumericFlow::Return(value));
+                            }
+                        }
+                    }
+                }
+                NumericStmt::Break => return Ok(NumericFlow::Break),
+                NumericStmt::Continue => return Ok(NumericFlow::Continue),
                 NumericStmt::Return(value) => {
                     let value = match value {
-                        Some(numeric_vm::NumberExpr::Int(value)) => {
-                            Value::Int(self.eval_numeric_int(value, integers, int_lists)?)
-                        }
-                        Some(numeric_vm::NumberExpr::Float(value)) => Value::Float(
-                            self.eval_numeric_float(value, integers, floats, int_lists)?,
-                        ),
+                        Some(value) => self.eval_numeric_value(value, frame)?,
                         None => Value::None,
                     };
                     return Ok(NumericFlow::Return(value));
@@ -1889,36 +2123,35 @@ impl<'a> Evaluator<'a> {
     fn eval_numeric_int(
         &mut self,
         expression: &VmIntExpr,
-        integers: &[i64],
-        int_lists: &[Vec<i64>],
+        frame: &NumericFrame,
     ) -> Result<i64, Diagnostic> {
         match expression {
             VmIntExpr::Literal(value) => Ok(*value),
-            VmIntExpr::Local(slot) => Ok(integers[*slot]),
+            VmIntExpr::Local(slot) => Ok(frame.integers[*slot]),
             VmIntExpr::Global(name, span) => match self.get_cached(name) {
                 Some(Value::Int(value)) => Ok(value),
                 Some(value) => Err(self.type_error(*span, "an Int", &value)),
                 None => Err(self.unknown(name, *span)),
             },
             VmIntExpr::Negate(value, span) => self
-                .eval_numeric_int(value, integers, int_lists)?
+                .eval_numeric_int(value, frame)?
                 .checked_neg()
                 .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
             VmIntExpr::Add(left, right, span) => self
-                .eval_numeric_int(left, integers, int_lists)?
-                .checked_add(self.eval_numeric_int(right, integers, int_lists)?)
+                .eval_numeric_int(left, frame)?
+                .checked_add(self.eval_numeric_int(right, frame)?)
                 .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
             VmIntExpr::Subtract(left, right, span) => self
-                .eval_numeric_int(left, integers, int_lists)?
-                .checked_sub(self.eval_numeric_int(right, integers, int_lists)?)
+                .eval_numeric_int(left, frame)?
+                .checked_sub(self.eval_numeric_int(right, frame)?)
                 .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
             VmIntExpr::Multiply(left, right, span) => self
-                .eval_numeric_int(left, integers, int_lists)?
-                .checked_mul(self.eval_numeric_int(right, integers, int_lists)?)
+                .eval_numeric_int(left, frame)?
+                .checked_mul(self.eval_numeric_int(right, frame)?)
                 .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
             VmIntExpr::IntegerDivide(left, right, span) => {
-                let left = self.eval_numeric_int(left, integers, int_lists)?;
-                let right = self.eval_numeric_int(right, integers, int_lists)?;
+                let left = self.eval_numeric_int(left, frame)?;
+                let right = self.eval_numeric_int(right, frame)?;
                 if right == 0 {
                     return Err(self.zero(*span));
                 }
@@ -1926,8 +2159,8 @@ impl<'a> Evaluator<'a> {
                     .ok_or_else(|| integer_overflow(*span, self.file, self.source))
             }
             VmIntExpr::Remainder(left, right, span) => {
-                let left = self.eval_numeric_int(left, integers, int_lists)?;
-                let right = self.eval_numeric_int(right, integers, int_lists)?;
+                let left = self.eval_numeric_int(left, frame)?;
+                let right = self.eval_numeric_int(right, frame)?;
                 if right == 0 {
                     return Err(self.zero(*span));
                 }
@@ -1935,14 +2168,24 @@ impl<'a> Evaluator<'a> {
                     .ok_or_else(|| integer_overflow(*span, self.file, self.source))
             }
             VmIntExpr::ListIndex(slot, index, span) => {
-                let index = self.eval_numeric_int(index, integers, int_lists)?;
-                let values = &int_lists[*slot];
+                let index = self.eval_numeric_int(index, frame)?;
+                let values = &frame.int_lists[*slot];
                 let Some(index) = normalize_index(index, values.len()) else {
                     return Err(self.index_error(*span, index, values.len()));
                 };
                 Ok(values[index])
             }
-            VmIntExpr::ListLength(slot) => Ok(int_lists[*slot].len() as i64),
+            VmIntExpr::ListLength(list) => Ok(match list {
+                NumericListRef::Int(slot) => frame.int_lists[*slot].len() as i64,
+                NumericListRef::Float(slot) => frame.float_lists[*slot].len() as i64,
+            }),
+            VmIntExpr::ListAggregate(slot, operation, span) => {
+                self.eval_numeric_int_aggregate(*operation, &frame.int_lists[*slot], *span)
+            }
+            VmIntExpr::Call(call) => match self.eval_numeric_call(call, frame)? {
+                Value::Int(value) => Ok(value),
+                value => Err(self.type_error(call.span, "an Int", &value)),
+            },
         }
     }
 
@@ -1950,63 +2193,70 @@ impl<'a> Evaluator<'a> {
     fn eval_numeric_float(
         &mut self,
         expression: &VmFloatExpr,
-        integers: &[i64],
-        floats: &[f64],
-        int_lists: &[Vec<i64>],
+        frame: &NumericFrame,
     ) -> Result<f64, Diagnostic> {
         match expression {
             VmFloatExpr::Literal(value) => Ok(*value),
-            VmFloatExpr::Local(slot) => Ok(floats[*slot]),
+            VmFloatExpr::Local(slot) => Ok(frame.floats[*slot]),
             VmFloatExpr::Global(name, span) => match self.get_cached(name) {
                 Some(Value::Float(value)) => Ok(value),
                 Some(Value::Int(value)) => Ok(value as f64),
                 Some(value) => Err(self.type_error(*span, "a Number", &value)),
                 None => Err(self.unknown(name, *span)),
             },
-            VmFloatExpr::FromInt(value) => {
-                Ok(self.eval_numeric_int(value, integers, int_lists)? as f64)
-            }
-            VmFloatExpr::Negate(value) => {
-                Ok(-self.eval_numeric_float(value, integers, floats, int_lists)?)
-            }
-            VmFloatExpr::Add(left, right) => Ok(self
-                .eval_numeric_float(left, integers, floats, int_lists)?
-                + self.eval_numeric_float(right, integers, floats, int_lists)?),
-            VmFloatExpr::Subtract(left, right) => Ok(self
-                .eval_numeric_float(left, integers, floats, int_lists)?
-                - self.eval_numeric_float(right, integers, floats, int_lists)?),
-            VmFloatExpr::Multiply(left, right) => Ok(self
-                .eval_numeric_float(left, integers, floats, int_lists)?
-                * self.eval_numeric_float(right, integers, floats, int_lists)?),
+            VmFloatExpr::FromInt(value) => Ok(self.eval_numeric_int(value, frame)? as f64),
+            VmFloatExpr::Negate(value) => Ok(-self.eval_numeric_float(value, frame)?),
+            VmFloatExpr::Add(left, right) => Ok(
+                self.eval_numeric_float(left, frame)? + self.eval_numeric_float(right, frame)?
+            ),
+            VmFloatExpr::Subtract(left, right) => Ok(
+                self.eval_numeric_float(left, frame)? - self.eval_numeric_float(right, frame)?
+            ),
+            VmFloatExpr::Multiply(left, right) => Ok(
+                self.eval_numeric_float(left, frame)? * self.eval_numeric_float(right, frame)?
+            ),
             VmFloatExpr::Divide(left, right, span) => {
-                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
-                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                let left = self.eval_numeric_float(left, frame)?;
+                let right = self.eval_numeric_float(right, frame)?;
                 if right == 0.0 {
                     return Err(self.zero(*span));
                 }
                 Ok(left / right)
             }
             VmFloatExpr::IntegerDivide(left, right, span) => {
-                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
-                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                let left = self.eval_numeric_float(left, frame)?;
+                let right = self.eval_numeric_float(right, frame)?;
                 if right == 0.0 {
                     return Err(self.zero(*span));
                 }
                 Ok((left / right).floor())
             }
             VmFloatExpr::Remainder(left, right, span) => {
-                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
-                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                let left = self.eval_numeric_float(left, frame)?;
+                let right = self.eval_numeric_float(right, frame)?;
                 if right == 0.0 {
                     return Err(self.zero(*span));
                 }
                 Ok(left % right)
             }
-            VmFloatExpr::Power(left, right) => Ok(self
-                .eval_numeric_float(left, integers, floats, int_lists)?
-                .powf(self.eval_numeric_float(right, integers, floats, int_lists)?)),
+            VmFloatExpr::Power(left, right, span) => {
+                let output = self
+                    .eval_numeric_float(left, frame)?
+                    .powf(self.eval_numeric_float(right, frame)?);
+                if output.is_nan() {
+                    Err(self.error(
+                        "Math Error",
+                        "power produced an invalid result",
+                        *span,
+                        "The base and exponent are outside the real-number domain.",
+                        "Use values that produce a real result.",
+                    ))
+                } else {
+                    Ok(output)
+                }
+            }
             VmFloatExpr::Math(operation, value, span) => {
-                let value = self.eval_numeric_float(value, integers, floats, int_lists)?;
+                let value = self.eval_numeric_float(value, frame)?;
                 let output = operation.apply(value);
                 if output.is_nan() {
                     Err(self.error(
@@ -2019,6 +2269,297 @@ impl<'a> Evaluator<'a> {
                 } else {
                     Ok(output)
                 }
+            }
+            VmFloatExpr::ListIndex(slot, index, span) => {
+                let index = self.eval_numeric_int(index, frame)?;
+                let values = &frame.float_lists[*slot];
+                let Some(index) = normalize_index(index, values.len()) else {
+                    return Err(self.index_error(*span, index, values.len()));
+                };
+                Ok(values[index])
+            }
+            VmFloatExpr::ListAggregate(list, operation, span) => {
+                self.eval_numeric_float_aggregate(*list, *operation, frame, *span)
+            }
+            VmFloatExpr::Call(call) => match self.eval_numeric_call(call, frame)? {
+                Value::Float(value) => Ok(value),
+                value => Err(self.type_error(call.span, "a Float", &value)),
+            },
+        }
+    }
+
+    #[inline(always)]
+    fn eval_numeric_bool(
+        &mut self,
+        expression: &VmBoolExpr,
+        frame: &NumericFrame,
+    ) -> Result<bool, Diagnostic> {
+        match expression {
+            VmBoolExpr::Literal(value) => Ok(*value),
+            VmBoolExpr::Local(slot) => Ok(frame.bools[*slot]),
+            VmBoolExpr::Global(name, span) => match self.get_cached(name) {
+                Some(Value::Bool(value)) => Ok(value),
+                Some(value) => Err(self.type_error(*span, "a Bool", &value)),
+                None => Err(self.unknown(name, *span)),
+            },
+            VmBoolExpr::Not(value) => Ok(!self.eval_numeric_bool(value, frame)?),
+            VmBoolExpr::And(left, right) => {
+                if !self.eval_numeric_bool(left, frame)? {
+                    Ok(false)
+                } else {
+                    self.eval_numeric_bool(right, frame)
+                }
+            }
+            VmBoolExpr::Or(left, right) => {
+                if self.eval_numeric_bool(left, frame)? {
+                    Ok(true)
+                } else {
+                    self.eval_numeric_bool(right, frame)
+                }
+            }
+            VmBoolExpr::IntTruthy(value) => Ok(self.eval_numeric_int(value, frame)? != 0),
+            VmBoolExpr::FloatTruthy(value) => Ok(self.eval_numeric_float(value, frame)? != 0.0),
+            VmBoolExpr::NumberCompare(left, operation, right, span) => {
+                let left = self.eval_numeric_number(left, frame)?;
+                let right = self.eval_numeric_number(right, frame)?;
+                self.numeric_comparison(left, *operation, right, *span)
+            }
+            VmBoolExpr::BoolCompare(left, operation, right) => {
+                let left = self.eval_numeric_bool(left, frame)?;
+                let right = self.eval_numeric_bool(right, frame)?;
+                Ok(comparison_matches(left.cmp(&right), *operation))
+            }
+            VmBoolExpr::Call(call) => match self.eval_numeric_call(call, frame)? {
+                Value::Bool(value) => Ok(value),
+                value => Err(self.type_error(call.span, "a Bool", &value)),
+            },
+        }
+    }
+
+    fn eval_numeric_number(
+        &mut self,
+        expression: &numeric_vm::NumberExpr,
+        frame: &NumericFrame,
+    ) -> Result<NumericNumber, Diagnostic> {
+        match expression {
+            numeric_vm::NumberExpr::Int(value) => {
+                Ok(NumericNumber::Int(self.eval_numeric_int(value, frame)?))
+            }
+            numeric_vm::NumberExpr::Float(value) => {
+                Ok(NumericNumber::Float(self.eval_numeric_float(value, frame)?))
+            }
+        }
+    }
+
+    fn eval_numeric_value(
+        &mut self,
+        expression: &NumericValueExpr,
+        frame: &NumericFrame,
+    ) -> Result<Value, Diagnostic> {
+        match expression {
+            NumericValueExpr::Int(value) => Ok(Value::Int(self.eval_numeric_int(value, frame)?)),
+            NumericValueExpr::Float(value) => {
+                Ok(Value::Float(self.eval_numeric_float(value, frame)?))
+            }
+            NumericValueExpr::Bool(value) => Ok(Value::Bool(self.eval_numeric_bool(value, frame)?)),
+        }
+    }
+
+    fn eval_numeric_call(
+        &mut self,
+        call: &NumericCall,
+        frame: &NumericFrame,
+    ) -> Result<Value, Diagnostic> {
+        let mut args = Vec::with_capacity(call.args.len());
+        for argument in &call.args {
+            args.push(self.eval_numeric_value(argument, frame)?);
+        }
+        if call.builtin {
+            self.call_builtin(&call.name, args, call.span)
+        } else {
+            self.call_named(&call.name, args, call.span)
+        }
+    }
+
+    fn numeric_comparison(
+        &self,
+        left: NumericNumber,
+        operation: VmCompareOp,
+        right: NumericNumber,
+        span: Span,
+    ) -> Result<bool, Diagnostic> {
+        if matches!(operation, VmCompareOp::Equal | VmCompareOp::NotEqual) {
+            let equal = numeric_numbers_equal(left, right);
+            return Ok(if matches!(operation, VmCompareOp::Equal) {
+                equal
+            } else {
+                !equal
+            });
+        }
+        let ordering = numeric_number_cmp(left, right).ok_or_else(|| {
+            self.error(
+                "Type Error",
+                "values cannot be ordered",
+                span,
+                "NAN does not have a mathematical ordering.",
+                "Check for NAN before ordering values.",
+            )
+        })?;
+        Ok(comparison_matches(ordering, operation))
+    }
+
+    fn eval_numeric_int_aggregate(
+        &self,
+        operation: IntListOp,
+        values: &[i64],
+        span: Span,
+    ) -> Result<i64, Diagnostic> {
+        if values.is_empty() && !matches!(operation, IntListOp::Sum | IntListOp::Product) {
+            return Err(self.error(
+                "Value Error",
+                "aggregate requires a non-empty List",
+                span,
+                "There is no aggregate value for an empty list.",
+                "Add numeric values first.",
+            ));
+        }
+        match operation {
+            IntListOp::Sum => values.iter().try_fold(0i64, |total, value| {
+                total.checked_add(*value).ok_or_else(|| {
+                    self.error(
+                        "Value Error",
+                        "integer overflow in sum",
+                        span,
+                        "The sum exceeds Int limits.",
+                        "Use Float values or smaller numbers.",
+                    )
+                })
+            }),
+            IntListOp::Product => values.iter().try_fold(1i64, |total, value| {
+                total.checked_mul(*value).ok_or_else(|| {
+                    self.error(
+                        "Value Error",
+                        "integer overflow in product",
+                        span,
+                        "The product exceeds Int limits.",
+                        "Use Float values or smaller numbers.",
+                    )
+                })
+            }),
+            IntListOp::Min => Ok(*values.iter().min().unwrap()),
+            IntListOp::Max => Ok(*values.iter().max().unwrap()),
+        }
+    }
+
+    fn eval_numeric_float_aggregate(
+        &self,
+        list: NumericListRef,
+        operation: FloatListOp,
+        frame: &NumericFrame,
+        span: Span,
+    ) -> Result<f64, Diagnostic> {
+        match list {
+            NumericListRef::Int(slot) => self.float_aggregate(
+                operation,
+                frame.int_lists[slot].iter().map(|value| *value as f64),
+                frame.int_lists[slot].len(),
+                span,
+            ),
+            NumericListRef::Float(slot) => self.float_aggregate(
+                operation,
+                frame.float_lists[slot].iter().copied(),
+                frame.float_lists[slot].len(),
+                span,
+            ),
+        }
+    }
+
+    fn float_aggregate<I>(
+        &self,
+        operation: FloatListOp,
+        values: I,
+        len: usize,
+        span: Span,
+    ) -> Result<f64, Diagnostic>
+    where
+        I: Iterator<Item = f64> + Clone,
+    {
+        if len == 0 && !matches!(operation, FloatListOp::Sum | FloatListOp::Product) {
+            return Err(self.error(
+                "Value Error",
+                "aggregate requires a non-empty List",
+                span,
+                "There is no aggregate value for an empty list.",
+                "Add numeric values first.",
+            ));
+        }
+        match operation {
+            FloatListOp::Sum => Ok(compensated_sum(values)),
+            FloatListOp::Product => Ok(values.product()),
+            FloatListOp::Min | FloatListOp::Max => {
+                let mut values = values;
+                let mut best = values.next().unwrap();
+                for value in values {
+                    let ordering = value.partial_cmp(&best).unwrap_or(Ordering::Equal);
+                    if (matches!(operation, FloatListOp::Min) && ordering == Ordering::Less)
+                        || (matches!(operation, FloatListOp::Max) && ordering == Ordering::Greater)
+                    {
+                        best = value;
+                    }
+                }
+                Ok(best)
+            }
+            FloatListOp::Mean => Ok(compensated_sum(values) / len as f64),
+            FloatListOp::Variance | FloatListOp::Std => {
+                let mut count = 0.0;
+                let mut mean = 0.0;
+                let mut squared = 0.0;
+                for value in values {
+                    count += 1.0;
+                    let delta = value - mean;
+                    mean += delta / count;
+                    squared += delta * (value - mean);
+                }
+                let variance = squared / count;
+                Ok(if matches!(operation, FloatListOp::Std) {
+                    variance.sqrt()
+                } else {
+                    variance
+                })
+            }
+            FloatListOp::Median => {
+                let mut sorted = values.collect::<Vec<_>>();
+                sorted.sort_by(f64::total_cmp);
+                let middle = sorted.len() / 2;
+                Ok(if sorted.len() % 2 == 0 {
+                    (sorted[middle - 1] + sorted[middle]) / 2.0
+                } else {
+                    sorted[middle]
+                })
+            }
+            FloatListOp::Mode => {
+                let mut sorted = values.collect::<Vec<_>>();
+                sorted.sort_by(f64::total_cmp);
+                let mut best = sorted[0];
+                let mut best_count = 1usize;
+                let mut current = sorted[0];
+                let mut current_count = 1usize;
+                for value in sorted.into_iter().skip(1) {
+                    if value.total_cmp(&current) == Ordering::Equal {
+                        current_count += 1;
+                    } else {
+                        if current_count > best_count {
+                            best = current;
+                            best_count = current_count;
+                        }
+                        current = value;
+                        current_count = 1;
+                    }
+                }
+                if current_count > best_count {
+                    best = current;
+                }
+                Ok(best)
             }
         }
     }
@@ -2115,7 +2656,7 @@ impl<'a> Evaluator<'a> {
         "len"=>{zero_args(&args,span,"len",self)?;Ok(Value::Int(v.len() as i64))},
         "clear"=>{zero_args(&args,span,"clear",self)?;if frozen{return Err(self.const_error(span))}v.clear();Ok(Value::None)},
         "copy"=>{zero_args(&args,span,"copy",self)?;Ok(Value::List(Rc::new(RefCell::new(v.clone())),false))},
-        "unique"=>{zero_args(&args,span,"unique",self)?;let mut out=vec![];for x in v.iter(){if !out.contains(x){out.push(x.clone())}}Ok(Value::List(Rc::new(RefCell::new(out)),false))},
+        "unique"=>{zero_args(&args,span,"unique",self)?;Ok(Value::List(Rc::new(RefCell::new(unique_values(&v))),false))},
         "reverse"=>{zero_args(&args,span,"reverse",self)?;if frozen{return Err(self.const_error(span))}v.reverse();Ok(Value::None)},
         "sort"=>{zero_args(&args,span,"sort",self)?;if frozen{return Err(self.const_error(span))}v.sort_by(|a,b|compare(a,b).unwrap_or(Ordering::Equal));Ok(Value::None)},
         "sum"|"product"|"min"|"max"|"mean"|"median"|"mode"|"variance"|"std"=>{zero_args(&args,span,name,self)?;aggregate(name,&v,span,self)},
@@ -2412,8 +2953,32 @@ impl<'a> Evaluator<'a> {
                         "Use a smaller digit count.",
                     )
                 })?);
-                let out = (x * factor).round() / factor;
+                if !factor.is_finite() || factor == 0.0 {
+                    return Err(self.error(
+                        "Value Error",
+                        "round digits are outside the supported Float range",
+                        span,
+                        "The decimal scale cannot be represented accurately.",
+                        "Use a digit count between -308 and 308.",
+                    ));
+                }
+                let scaled = x * factor;
+                let out = if scaled.is_infinite() && x.is_finite() {
+                    x
+                } else {
+                    scaled.round() / factor
+                };
                 if digits == 0 {
+                    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+                    if !out.is_finite() || out < i64::MIN as f64 || out >= I64_UPPER_EXCLUSIVE {
+                        return Err(self.error(
+                            "Value Error",
+                            "rounded value is outside Int limits",
+                            span,
+                            "round(value) returns Int and cannot silently clamp the result.",
+                            "Use a smaller finite value or keep decimal digits.",
+                        ));
+                    }
                     Ok(Value::Int(out as i64))
                 } else {
                     Ok(Value::Float(out))
@@ -2592,9 +3157,11 @@ impl<'a> Evaluator<'a> {
                 ))
             }
             Value::String(v) => {
-                let c: Vec<char> = v.chars().collect();
-                let (s, e) = slice_bounds(a, z, c.len(), span, self)?;
-                Ok(Value::String(c[s..e].iter().collect()))
+                let len = v.chars().count();
+                let (start, end) = slice_bounds(a, z, len, span, self)?;
+                let start_byte = char_byte_index(&v, start);
+                let end_byte = char_byte_index(&v, end);
+                Ok(Value::String(v[start_byte..end_byte].to_owned()))
             }
             v => Err(self.type_error(span, "a List or String", &v)),
         }
@@ -3019,12 +3586,132 @@ fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.partial_cmp(y),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+        (Value::Int(x), Value::Float(y)) => compare_int_float_exact(*x, *y),
+        (Value::Float(x), Value::Int(y)) => compare_int_float_exact(*y, *x).map(Ordering::reverse),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         _ => None,
     }
+}
+
+fn unique_values(values: &[Value]) -> Vec<Value> {
+    let mut scalar_seen = StdHashSet::with_capacity(values.len());
+    let mut complex_seen: Vec<&Value> = vec![];
+    let mut unique = Vec::with_capacity(values.len());
+    for value in values {
+        if let Some(key) = scalar_key(value) {
+            if scalar_seen.insert(key) {
+                unique.push(value.clone());
+            }
+        } else if !complex_seen.contains(&value) {
+            complex_seen.push(value);
+            unique.push(value.clone());
+        }
+    }
+    unique
+}
+
+fn scalar_key(value: &Value) -> Option<ScalarKey> {
+    Some(match value {
+        Value::None => ScalarKey::None,
+        Value::Bool(value) => ScalarKey::Bool(*value),
+        Value::Int(value) => ScalarKey::Int(*value),
+        Value::Float(value) => {
+            if value.is_nan() {
+                return None;
+            }
+            const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+            if *value >= i64::MIN as f64 && *value < I64_UPPER_EXCLUSIVE && value.fract() == 0.0 {
+                let integer = *value as i64;
+                if compare_int_float_exact(integer, *value) == Some(Ordering::Equal) {
+                    return Some(ScalarKey::Int(integer));
+                }
+            }
+            ScalarKey::Float(value.to_bits())
+        }
+        Value::String(value) => ScalarKey::String(value.clone()),
+        Value::List(..)
+        | Value::Range(..)
+        | Value::Function(..)
+        | Value::Class(..)
+        | Value::Instance(..) => return None,
+    })
+}
+
+fn compare_int_float_exact(integer: i64, float: f64) -> Option<Ordering> {
+    if float.is_nan() {
+        return None;
+    }
+    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if float >= I64_UPPER_EXCLUSIVE {
+        return Some(Ordering::Less);
+    }
+    if float < i64::MIN as f64 {
+        return Some(Ordering::Greater);
+    }
+
+    let truncated = float.trunc() as i64;
+    match integer.cmp(&truncated) {
+        Ordering::Equal if float.fract() > 0.0 => Some(Ordering::Less),
+        Ordering::Equal if float.fract() < 0.0 => Some(Ordering::Greater),
+        ordering => Some(ordering),
+    }
+}
+
+fn numeric_numbers_equal(left: NumericNumber, right: NumericNumber) -> bool {
+    match (left, right) {
+        (NumericNumber::Int(left), NumericNumber::Int(right)) => left == right,
+        (NumericNumber::Float(left), NumericNumber::Float(right)) => left == right,
+        (NumericNumber::Int(left), NumericNumber::Float(right)) => {
+            compare_int_float_exact(left, right) == Some(Ordering::Equal)
+        }
+        (NumericNumber::Float(left), NumericNumber::Int(right)) => {
+            compare_int_float_exact(right, left) == Some(Ordering::Equal)
+        }
+    }
+}
+
+fn numeric_number_cmp(left: NumericNumber, right: NumericNumber) -> Option<Ordering> {
+    match (left, right) {
+        (NumericNumber::Int(left), NumericNumber::Int(right)) => Some(left.cmp(&right)),
+        (NumericNumber::Float(left), NumericNumber::Float(right)) => left.partial_cmp(&right),
+        (NumericNumber::Int(left), NumericNumber::Float(right)) => {
+            compare_int_float_exact(left, right)
+        }
+        (NumericNumber::Float(left), NumericNumber::Int(right)) => {
+            compare_int_float_exact(right, left).map(Ordering::reverse)
+        }
+    }
+}
+
+fn comparison_matches(ordering: Ordering, operation: VmCompareOp) -> bool {
+    match operation {
+        VmCompareOp::Equal => ordering == Ordering::Equal,
+        VmCompareOp::NotEqual => ordering != Ordering::Equal,
+        VmCompareOp::Less => ordering == Ordering::Less,
+        VmCompareOp::LessEqual => ordering != Ordering::Greater,
+        VmCompareOp::Greater => ordering == Ordering::Greater,
+        VmCompareOp::GreaterEqual => ordering != Ordering::Less,
+    }
+}
+
+fn compensated_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for value in values {
+        compensated_add(&mut sum, &mut correction, value);
+    }
+    sum + correction
+}
+
+fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) {
+    let next = *sum + value;
+    if sum.abs() >= value.abs() {
+        *correction += (*sum - next) + value;
+    } else {
+        *correction += (value - next) + *sum;
+    }
+    *sum = next;
 }
 fn normalize_index(i: i64, len: usize) -> Option<usize> {
     let n = if i < 0 { len as i64 + i } else { i };
@@ -3033,6 +3720,13 @@ fn normalize_index(i: i64, len: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn char_byte_index(value: &str, character_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(character_index)
+        .map_or(value.len(), |(byte, _)| byte)
 }
 
 fn list_would_cycle(target: &Rc<RefCell<Vec<Value>>>, value: &Value) -> bool {
@@ -3213,10 +3907,6 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
             "Add numeric values first.",
         ));
     }
-    let nums = v
-        .iter()
-        .map(|x| as_number(x, s, e))
-        .collect::<Result<Vec<_>, _>>()?;
     match n {
         "sum" => {
             if v.iter().all(|x| matches!(x, Value::Int(_))) {
@@ -3237,7 +3927,12 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
                 }
                 Ok(Value::Int(total))
             } else {
-                Ok(Value::Float(nums.iter().sum()))
+                let mut total = 0.0;
+                let mut correction = 0.0;
+                for value in v {
+                    compensated_add(&mut total, &mut correction, as_number(value, s, e)?);
+                }
+                Ok(Value::Float(total + correction))
             }
         }
         "product" => {
@@ -3259,12 +3954,26 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
                 }
                 Ok(Value::Int(total))
             } else {
-                Ok(Value::Float(nums.iter().product()))
+                let mut product = 1.0;
+                for value in v {
+                    product *= as_number(value, s, e)?;
+                }
+                Ok(Value::Float(product))
             }
         }
-        "mean" => Ok(Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)),
+        "mean" => {
+            let mut total = 0.0;
+            let mut correction = 0.0;
+            for value in v {
+                compensated_add(&mut total, &mut correction, as_number(value, s, e)?);
+            }
+            Ok(Value::Float((total + correction) / v.len() as f64))
+        }
         "median" => {
-            let mut sorted = nums.clone();
+            let mut sorted = v
+                .iter()
+                .map(|value| as_number(value, s, e))
+                .collect::<Result<Vec<_>, _>>()?;
             sorted.sort_by(f64::total_cmp);
             let middle = sorted.len() / 2;
             let value = if sorted.len() % 2 == 0 {
@@ -3275,9 +3984,17 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
             Ok(Value::Float(value))
         }
         "variance" | "std" => {
-            let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-            let variance =
-                nums.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+            let mut count = 0.0;
+            let mut mean = 0.0;
+            let mut squared = 0.0;
+            for value in v {
+                let value = as_number(value, s, e)?;
+                count += 1.0;
+                let delta = value - mean;
+                mean += delta / count;
+                squared += delta * (value - mean);
+            }
+            let variance = squared / count;
             Ok(Value::Float(if n == "std" {
                 variance.sqrt()
             } else {
@@ -3285,7 +4002,10 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
             }))
         }
         "mode" => {
-            let mut sorted = nums.clone();
+            let mut sorted = v
+                .iter()
+                .map(|value| as_number(value, s, e))
+                .collect::<Result<Vec<_>, _>>()?;
             sorted.sort_by(f64::total_cmp);
             let mut best = sorted[0];
             let mut best_count = 1;
@@ -3308,20 +4028,21 @@ fn aggregate(n: &str, v: &[Value], s: Span, e: &Evaluator) -> Result<Value, Diag
             }
             Ok(Value::Float(best))
         }
-        "min" => Ok(v[nums
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
-            .unwrap()
-            .0]
-            .clone()),
-        "max" => Ok(v[nums
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
-            .unwrap()
-            .0]
-            .clone()),
+        "min" | "max" => {
+            for value in v {
+                as_number(value, s, e)?;
+            }
+            let mut best = &v[0];
+            for value in &v[1..] {
+                let ordering = compare(value, best).unwrap_or(Ordering::Equal);
+                if (n == "min" && ordering == Ordering::Less)
+                    || (n == "max" && ordering == Ordering::Greater)
+                {
+                    best = value;
+                }
+            }
+            Ok(best.clone())
+        }
         _ => unreachable!(),
     }
 }

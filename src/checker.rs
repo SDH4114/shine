@@ -554,13 +554,21 @@ impl<'a> Checker<'a> {
                         return Err(self.type_error("List", actual, *span));
                     }
                 }
+                let numeric_item = match &object_ty {
+                    Some(TypeRef::List(Some(item)))
+                        if matches!(item.as_ref(), TypeRef::Int | TypeRef::Float) =>
+                    {
+                        Some(item.as_ref().clone())
+                    }
+                    _ => None,
+                };
                 Ok(match name.as_str() {
                     "have" | "remove" => Some(TypeRef::Bool),
                     "index" => None,
                     "len" => Some(TypeRef::Int),
                     "copy" | "unique" => object_ty,
-                    "sum" | "product" | "min" | "max" | "mean" | "median" | "mode" | "variance"
-                    | "std" => Some(TypeRef::Number),
+                    "sum" | "product" | "min" | "max" => numeric_item.or(Some(TypeRef::Number)),
+                    "mean" | "median" | "mode" | "variance" | "std" => Some(TypeRef::Float),
                     "add" | "clear" | "reverse" | "sort" => Some(TypeRef::None),
                     "del" => None,
                     _ => {
@@ -803,6 +811,7 @@ fn compatible(expected: &TypeRef, actual: &TypeRef) -> bool {
     match (expected, actual) {
         (TypeRef::Number, TypeRef::Int | TypeRef::Float | TypeRef::Number) => true,
         (TypeRef::List(None), TypeRef::List(_)) => true,
+        (TypeRef::List(Some(_)), TypeRef::List(None)) => true,
         (TypeRef::List(Some(a)), TypeRef::List(Some(b))) => compatible(a, b),
         (a, b) => a == b,
     }
@@ -914,18 +923,44 @@ fn is_builtin(name: &str) -> bool {
             | "assert"
     )
 }
-fn builtin_return(name: &str, _: &[Option<TypeRef>]) -> Option<TypeRef> {
+fn builtin_return(name: &str, arguments: &[Option<TypeRef>]) -> Option<TypeRef> {
     match name {
         "print" | "writeFile" | "assert" => Some(TypeRef::None),
         "input" | "string" | "readFile" | "type" => Some(TypeRef::String),
         "length" => Some(TypeRef::Int),
         "bool" | "isNan" | "isInfinite" | "isFinite" => Some(TypeRef::Bool),
         "sign" | "gcd" | "lcm" | "factorial" => Some(TypeRef::Int),
-        "number" | "abs" | "round" | "floor" | "ceil" | "pow" | "min" | "max" | "sum" | "sqrt"
-        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "log" | "log10" | "log2" | "exp"
-        | "exp2" | "cbrt" | "trunc" | "fract" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
-        | "atanh" | "degrees" | "radians" | "hypot" | "atan2" | "clamp" | "product" | "mean"
-        | "median" | "mode" | "variance" | "std" => Some(TypeRef::Number),
+        "sum" | "product" => arguments
+            .first()
+            .and_then(|argument| match argument {
+                Some(TypeRef::List(Some(item)))
+                    if matches!(item.as_ref(), TypeRef::Int | TypeRef::Float) =>
+                {
+                    Some(item.as_ref().clone())
+                }
+                _ => None,
+            })
+            .or(Some(TypeRef::Number)),
+        "min" | "max" => {
+            let first = arguments.first().cloned().flatten();
+            if first.as_ref().is_some_and(|first| {
+                matches!(first, TypeRef::Int | TypeRef::Float)
+                    && arguments
+                        .iter()
+                        .all(|argument| argument.as_ref() == Some(first))
+            }) {
+                first
+            } else {
+                Some(TypeRef::Number)
+            }
+        }
+        "mean" | "median" | "mode" | "variance" | "std" | "abs" | "floor" | "ceil" | "pow"
+        | "sqrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "log" | "log10" | "log2"
+        | "exp" | "exp2" | "cbrt" | "trunc" | "fract" | "sinh" | "cosh" | "tanh" | "asinh"
+        | "acosh" | "atanh" | "degrees" | "radians" | "hypot" | "atan2" | "clamp" => {
+            Some(TypeRef::Float)
+        }
+        "number" | "round" => Some(TypeRef::Number),
         _ => None,
     }
 }
