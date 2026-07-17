@@ -1,0 +1,19 @@
+{
+  "$schema": "https://zed.dev/schema/icon_themes/v0.3.0.json",
+  "name": "Shine Icons",
+  "author": "Shine contributors",
+  "themes": [
+    {
+      "name": "Shine Icons",
+      "appearance": "dark",
+      "file_suffixes": {
+        "shn": "shine"
+      },
+      "file_icons": {
+        "shine": {
+          "path": "./icons/shine.png"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+id = "shine"
+name = "Shine"
+version = "0.1.0"
+schema_version = 1
+authors = ["Shine contributors"]
+description = "Syntax highlighting and language support for the Shine programming language."
+repository = "https://github.com/SDH4114/shine"
+icon = "shine.png"
+
+[grammars.shine]
+# Zed checks out grammars into `grammars/shine` and requires a real Git
+# revision. This local file URL keeps dev-extension installs offline after
+# the initial Zed WASI toolchain has been cached.
+repository = "file:///Users/aminmammadov/giti/shine/zed-extension/tree-sitter-shine"
+rev = "2df0866551a7b3bfebc278c30a894082f102916c"
