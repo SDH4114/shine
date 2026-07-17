@@ -1,6 +1,6 @@
 # Shine
 
-Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model while the tree-walking evaluator remains the semantic reference backend.
+Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model. The runtime keeps the tree-walking evaluator as its semantic fallback and automatically uses a compact numeric VM for typed numeric functions and integer-list hot paths.
 
 Полная русскоязычная документация: [docs/README.md](docs/README.md).
 
@@ -183,7 +183,7 @@ cargo run -- run examples/statistics.shn
 
 ## Performance benchmark
 
-The repository includes checksum-validated equivalent workloads for Shine, Python, C#, and Rust:
+The repository includes checksum-validated equivalent workloads for Shine, Python, Rust, C++, and C#:
 
 ```bash
 python3 benchmarks/run_benchmarks.py

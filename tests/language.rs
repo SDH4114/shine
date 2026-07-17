@@ -478,3 +478,139 @@ fn optimized_compound_math_preserves_overflow_diagnostics() {
     assert_eq!(error.category, "Value Error");
     assert!(error.message.contains("integer overflow"));
 }
+
+#[test]
+fn rejects_cyclic_lists_instead_of_recursing_forever() {
+    let error = run_source("values = []\nvalues.add(values)\n", "cycle.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
+    assert!(error.message.contains("cyclic List"));
+}
+
+#[test]
+fn rejects_cyclic_objects_that_would_leak_reference_counts() {
+    let direct = run_source(
+        "class Node { next = none }\nnode = Node()\nnode.next = node\n",
+        "object-cycle.shn",
+    )
+    .unwrap_err();
+    assert_eq!(direct.category, "Value Error");
+    assert!(direct.message.contains("cyclic Object"));
+
+    let indirect = run_source(
+        "class Node { next = none }\na = Node()\nb = Node()\na.next = b\nb.next = a\n",
+        "object-cycle.shn",
+    )
+    .unwrap_err();
+    assert_eq!(indirect.category, "Value Error");
+    assert!(indirect.message.contains("cyclic Object"));
+}
+
+#[test]
+fn caps_unbounded_repetition_before_allocating_memory() {
+    let error = run_source("value = \"x\" * 300_000_000\n", "repeat-limit.shn").unwrap_err();
+    assert_eq!(error.category, "Value Error");
+    assert!(error.message.contains("repetition is too large"));
+}
+
+#[test]
+fn functions_cannot_read_callers_private_locals() {
+    let source = r#"
+fn inner(): Int { return secret }
+fn outer(): Int {
+    secret = 42
+    return inner()
+}
+
+print(outer())
+"#;
+    let error = run_source(source, "scope.shn").unwrap_err();
+    assert_eq!(error.category, "Name Error");
+    assert!(error.message.contains("secret"));
+}
+
+#[test]
+fn entering_a_call_frame_invalidates_cached_bindings() {
+    let source = r#"
+fn inner(): Int { return missing }
+fn outer(): Int {
+    secret = 42
+    cached = secret
+    return inner()
+}
+outer()
+"#;
+    let error = run_source(source, "scope-cache.shn").unwrap_err();
+    assert_eq!(error.category, "Name Error");
+    assert!(error.message.contains("missing"));
+}
+
+#[test]
+fn destructuring_cannot_mutate_callers_private_locals() {
+    let source = r#"
+fn inner() { [secret] = [99] }
+fn outer(): Int {
+    secret = 42
+    inner()
+    return secret
+}
+assert(outer() == 42)
+"#;
+    run_source(source, "scope-destructure.shn").unwrap();
+}
+
+#[test]
+fn numeric_hot_path_preserves_float_and_integer_list_results() {
+    let source = r#"
+fn float_loop(): Float {
+    total = 0.0
+    loop i in 0..1000 {
+        x = (i + 1) * 0.001
+        total += sin(x) + sqrt(x + 1.0)
+    }
+    return total
+}
+
+fn list_loop(): Int {
+    values = []
+    loop i in 0..1000 { values.add((i * 17) % 997) }
+    values.sort()
+    return values[0] + values[500] + values[999] + values.len()
+}
+
+fn main() {
+    assert(round(float_loop(), 6) == 1679.276902)
+    assert(list_loop() == 2493)
+}
+"#;
+    check_source(source, "numeric-hot-path.shn").unwrap();
+    run_source(source, "numeric-hot-path.shn").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_modules_outside_the_source_root() {
+    use std::os::unix::fs::symlink;
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("shine-module-symlink-{suffix}"));
+    let outside = std::env::temp_dir().join(format!("shine-outside-{suffix}.shn"));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&outside, "export fn value() { return 1 }\n").unwrap();
+    fs::write(
+        root.join("main.shn"),
+        "import escaped\nfn main() { print(escaped.value()) }\n",
+    )
+    .unwrap();
+    symlink(&outside, root.join("escaped.shn")).unwrap();
+
+    let error = check_file(&root.join("main.shn")).unwrap_err();
+    assert_eq!(error.category, "Module Error");
+    assert!(error.message.contains("escapes the source root"));
+
+    fs::remove_file(root.join("escaped.shn")).ok();
+    fs::remove_file(&outside).ok();
+    fs::remove_dir_all(root).ok();
+}

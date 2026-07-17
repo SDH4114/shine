@@ -7,6 +7,7 @@ pub mod evaluator;
 pub mod hir;
 pub mod lexer;
 pub mod modules;
+mod numeric_vm;
 pub mod parser;
 pub mod source;
 pub mod token;

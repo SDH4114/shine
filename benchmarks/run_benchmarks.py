@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, validate, and time the same workload in Shine, Python, and C#."""
+"""Build, validate, and time the same workload in Shine, Python, Rust, C++, and C#."""
 
 from __future__ import annotations
 
@@ -42,6 +42,19 @@ def build() -> None:
             "codegen-units=1",
             "-o",
             "target/release/rust-benchmark",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "c++",
+            "benchmarks/cpp/benchmark.cpp",
+            "-std=c++17",
+            "-O3",
+            "-DNDEBUG",
+            "-o",
+            "target/release/cpp-benchmark",
         ],
         cwd=ROOT,
         check=True,
@@ -139,6 +152,7 @@ def main() -> None:
         "Shine 0.1.3": [str(ROOT / "target/release/shine"), "run", "benchmarks/benchmark.shn"],
         f"Python {platform.python_version()}": [sys.executable, "benchmarks/benchmark.py"],
         f"Rust {rust_version} Release": [str(ROOT / "target/release/rust-benchmark")],
+        "C++ Release": [str(ROOT / "target/release/cpp-benchmark")],
         "C# .NET 10 Release": [
             "dotnet",
             "benchmarks/csharp/bin/Release/net10.0/Benchmark.dll",

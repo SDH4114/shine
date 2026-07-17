@@ -70,6 +70,13 @@ impl ModuleResolver {
                 "Create the module file or correct the import path.",
             )
         })?;
+        if !canonical.starts_with(&self.source_root) {
+            return Err(Diagnostic::plain(
+                "Module Error",
+                format!("module path escapes the source root: {}", path.display()),
+                "Imports must resolve inside the entry file's source directory.",
+            ));
+        }
         if let Some(id) = self.resolved.get(&canonical) {
             return Ok(*id);
         }

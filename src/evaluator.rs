@@ -1,14 +1,24 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    collections::HashMap as StdHashMap,
+    collections::{HashMap as StdHashMap, HashSet as StdHashSet},
     fmt,
     hash::{BuildHasherDefault, Hasher},
     io::{self, Write},
     rc::Rc,
 };
 
-use crate::{ast::*, diagnostics::Diagnostic, lexer::Lexer, parser::Parser, token::Span};
+use crate::{
+    ast::*,
+    diagnostics::Diagnostic,
+    lexer::Lexer,
+    numeric_vm::{
+        self, FloatExpr as VmFloatExpr, IntExpr as VmIntExpr, NumericFunction, NumericParameter,
+        NumericStmt,
+    },
+    parser::Parser,
+    token::Span,
+};
 
 struct FnvHasher(u64);
 
@@ -52,6 +62,7 @@ pub struct FunctionValue {
     params: Vec<Param>,
     return_type: Option<TypeRef>,
     body: Block,
+    numeric: Option<Rc<NumericFunction>>,
 }
 
 #[derive(Clone)]
@@ -107,74 +118,97 @@ impl Value {
             Self::Class(_) | Self::Instance(..) => true,
         }
     }
-    fn frozen(self) -> Self {
-        match self {
-            Self::List(v, _) => {
-                let values = v.borrow().iter().cloned().map(Value::frozen).collect();
-                Self::List(Rc::new(RefCell::new(values)), true)
-            }
-            Self::Instance(value, _) => Self::Instance(value, true),
-            v => v,
-        }
-    }
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => write!(f, "none"),
-            Self::Bool(v) => write!(f, "{v}"),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Float(v) => {
-                if v.is_nan() {
-                    write!(f, "NAN")
-                } else if v.is_infinite() {
-                    if v.is_sign_negative() {
-                        write!(f, "-INF")
-                    } else {
-                        write!(f, "INF")
-                    }
-                } else {
-                    write!(f, "{v}")
+        fn display(
+            value: &Value,
+            f: &mut fmt::Formatter<'_>,
+            active: &mut StdHashSet<usize>,
+        ) -> fmt::Result {
+            if let Value::List(items, _) = value {
+                let pointer = Rc::as_ptr(items) as usize;
+                if !active.insert(pointer) {
+                    return write!(f, "[<cycle>]");
                 }
-            }
-            Self::String(v) => write!(f, "{v}"),
-            Self::List(v, _) => {
                 write!(f, "[")?;
-                for (i, x) in v.borrow().iter().enumerate() {
+                for (i, item) in items.borrow().iter().enumerate() {
                     if i > 0 {
-                        write!(f, ", ")?
+                        write!(f, ", ")?;
                     }
-                    match x {
-                        Self::String(s) => write!(f, "\"{s}\"")?,
-                        _ => write!(f, "{x}")?,
+                    match item {
+                        Value::String(text) => write!(f, "\"{text}\"")?,
+                        _ => display(item, f, active)?,
                     }
                 }
-                write!(f, "]")
+                active.remove(&pointer);
+                return write!(f, "]");
             }
-            Self::Range(a, b) => write!(f, "{a}..{b}"),
-            Self::Function(_) => write!(f, "<function>"),
-            Self::Class(class) => write!(f, "<class {}>", class.name),
-            Self::Instance(instance, _) => write!(f, "<{} object>", instance.borrow().class.name),
+            match value {
+                Value::None => write!(f, "none"),
+                Value::Bool(v) => write!(f, "{v}"),
+                Value::Int(v) => write!(f, "{v}"),
+                Value::Float(v) => {
+                    if v.is_nan() {
+                        write!(f, "NAN")
+                    } else if v.is_infinite() {
+                        if v.is_sign_negative() {
+                            write!(f, "-INF")
+                        } else {
+                            write!(f, "INF")
+                        }
+                    } else {
+                        write!(f, "{v}")
+                    }
+                }
+                Value::String(v) => write!(f, "{v}"),
+                Value::List(..) => unreachable!("lists are handled before scalar formatting"),
+                Value::Range(a, b) => write!(f, "{a}..{b}"),
+                Value::Function(_) => write!(f, "<function>"),
+                Value::Class(class) => write!(f, "<class {}>", class.name),
+                Value::Instance(instance, _) => {
+                    write!(f, "<{} object>", instance.borrow().class.name)
+                }
+            }
         }
+        display(self, f, &mut StdHashSet::new())
     }
 }
 
 impl PartialEq for Value {
     fn eq(&self, o: &Self) -> bool {
-        match (self, o) {
-            (Self::None, Self::None) => true,
-            (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::Int(a), Self::Int(b)) => a == b,
-            (Self::Float(a), Self::Float(b)) => a == b,
-            (Self::Int(a), Self::Float(b)) => *a as f64 == *b,
-            (Self::Float(a), Self::Int(b)) => *a == *b as f64,
-            (Self::String(a), Self::String(b)) => a == b,
-            (Self::List(a, _), Self::List(b, _)) => *a.borrow() == *b.borrow(),
-            (Self::Class(a), Self::Class(b)) => Rc::ptr_eq(a, b),
-            (Self::Instance(a, _), Self::Instance(b, _)) => Rc::ptr_eq(a, b),
-            _ => false,
+        fn equal(a: &Value, b: &Value, seen: &mut StdHashSet<(usize, usize)>) -> bool {
+            if let (Value::List(left, _), Value::List(right, _)) = (a, b) {
+                let pair = (Rc::as_ptr(left) as usize, Rc::as_ptr(right) as usize);
+                if !seen.insert(pair) {
+                    return true;
+                }
+                let left_values = left.borrow();
+                let right_values = right.borrow();
+                return left_values.len() == right_values.len()
+                    && left_values
+                        .iter()
+                        .zip(right_values.iter())
+                        .all(|(left, right)| equal(left, right, seen));
+            }
+            match (a, b) {
+                (Value::None, Value::None) => true,
+                (Value::Bool(a), Value::Bool(b)) => a == b,
+                (Value::Int(a), Value::Int(b)) => a == b,
+                (Value::Float(a), Value::Float(b)) => a == b,
+                (Value::Int(a), Value::Float(b)) => *a as f64 == *b,
+                (Value::Float(a), Value::Int(b)) => *a == *b as f64,
+                (Value::String(a), Value::String(b)) => a == b,
+                (Value::List(..), Value::List(..)) => {
+                    unreachable!("lists are handled before scalar equality")
+                }
+                (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+                (Value::Instance(a, _), Value::Instance(b, _)) => Rc::ptr_eq(a, b),
+                _ => false,
+            }
         }
+        equal(self, o, &mut StdHashSet::new())
     }
 }
 
@@ -266,6 +300,7 @@ impl Default for BindingCacheEntry {
 }
 
 const BINDING_CACHE_SIZE: usize = 2048;
+const MAX_LOOP_ITERATIONS: usize = 10_000_000;
 
 #[derive(Clone, Copy)]
 struct FastNumber {
@@ -277,6 +312,11 @@ enum Flow {
     Return(Value),
     Break,
     Continue,
+}
+
+enum NumericFlow {
+    Normal,
+    Return(Value),
 }
 
 pub struct Evaluator<'a> {
@@ -379,6 +419,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn register_functions(&mut self, p: &Program) -> Result<(), Diagnostic> {
+        let numeric_globals = numeric_vm::collect_global_types(p);
         for s in &p.statements {
             if let Stmt::Function {
                 name,
@@ -388,12 +429,15 @@ impl<'a> Evaluator<'a> {
                 span,
             } = s
             {
+                let numeric =
+                    numeric_vm::compile_function(params, body, &numeric_globals).map(Rc::new);
                 self.define(
                     name,
                     Value::Function(Rc::new(FunctionValue {
                         params: params.clone(),
                         return_type: return_type.clone(),
                         body: body.clone(),
+                        numeric,
                     })),
                     None,
                     true,
@@ -447,6 +491,7 @@ impl<'a> Evaluator<'a> {
                                         params: params.clone(),
                                         return_type: return_type.clone(),
                                         body: body.clone(),
+                                        numeric: None,
                                     }),
                                     private: *private,
                                 },
@@ -560,7 +605,7 @@ impl<'a> Evaluator<'a> {
                 }
                 let mut v = self.eval(value)?;
                 if *constant {
-                    v = v.frozen();
+                    v = self.freeze_value(v, *span, &mut StdHashSet::new())?;
                 }
                 self.assign_target(target, ty.clone(), v, *constant, *op, *span)?;
                 Ok(Flow::Normal)
@@ -624,7 +669,7 @@ impl<'a> Evaluator<'a> {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                     }
                     guard += 1;
-                    if guard > 10_000_000 {
+                    if guard >= MAX_LOOP_ITERATIONS {
                         return Err(self.error(
                             "Runtime Error",
                             "loop iteration limit exceeded",
@@ -696,7 +741,18 @@ impl<'a> Evaluator<'a> {
         span: Span,
     ) -> Result<Flow, Diagnostic> {
         let mut value = start;
+        let mut iterations = 0usize;
         while if step > 0 { value < end } else { value > end } {
+            if iterations >= MAX_LOOP_ITERATIONS {
+                return Err(self.error(
+                    "Runtime Error",
+                    "loop iteration limit exceeded",
+                    span,
+                    "The loop ran more than ten million times.",
+                    "Use a smaller range or split the work into batches.",
+                ));
+            }
+            iterations += 1;
             match self.exec_for_iteration(name, Value::Int(value), body, span)? {
                 Flow::Normal | Flow::Continue => {}
                 Flow::Break => return Ok(Flow::Normal),
@@ -722,7 +778,16 @@ impl<'a> Evaluator<'a> {
         body: &Block,
         span: Span,
     ) -> Result<Flow, Diagnostic> {
-        for value in values {
+        for (iterations, value) in values.into_iter().enumerate() {
+            if iterations >= MAX_LOOP_ITERATIONS {
+                return Err(self.error(
+                    "Runtime Error",
+                    "loop iteration limit exceeded",
+                    span,
+                    "The loop ran more than ten million times.",
+                    "Use a smaller iterable or split the work into batches.",
+                ));
+            }
             match self.exec_for_iteration(name, value, body, span)? {
                 Flow::Normal | Flow::Continue => {}
                 Flow::Break => return Ok(Flow::Normal),
@@ -852,6 +917,15 @@ impl<'a> Evaluator<'a> {
                 if frozen {
                     return Err(self.const_error(*target_span));
                 }
+                if list_would_cycle(&items, &value) {
+                    return Err(self.error(
+                        "Value Error",
+                        "cannot create a cyclic List",
+                        *target_span,
+                        "Cyclic Lists make copying and comparison unsafe.",
+                        "Store a scalar value or a separate copy instead.",
+                    ));
+                }
                 let mut values = items.borrow_mut();
                 let i = normalize_index(idx, values.len())
                     .ok_or_else(|| self.index_error(*target_span, idx, values.len()))?;
@@ -901,6 +975,15 @@ impl<'a> Evaluator<'a> {
                         span,
                     )?
                 };
+                if value_reaches_instance(&instance, &value) {
+                    return Err(self.error(
+                        "Value Error",
+                        "cannot create a cyclic Object",
+                        *target_span,
+                        "Reference-counted Objects cannot contain a path back to themselves.",
+                        "Store a separate copy or keep the relationship one-way.",
+                    ));
+                }
                 instance.borrow_mut().fields.insert(name.clone(), value);
                 Ok(())
             }
@@ -1376,6 +1459,15 @@ impl<'a> Evaluator<'a> {
                             return Err(self.const_error(*span));
                         }
                         let value = self.eval(&args[0])?;
+                        if list_would_cycle(items, &value) {
+                            return Err(self.error(
+                                "Value Error",
+                                "cannot create a cyclic List",
+                                *span,
+                                "Cyclic Lists make copying and comparison unsafe.",
+                                "Store a scalar value or a separate copy instead.",
+                            ));
+                        }
                         if let Some(expected) = &expected_item {
                             self.ensure_type(&value, expected, *span)?;
                         }
@@ -1575,8 +1667,12 @@ impl<'a> Evaluator<'a> {
                 "Pass the required number of arguments.",
             ));
         }
-        self.call_depth += 1;
-        if self.call_depth > 1000 {
+        for (parameter, value) in f.params.iter().zip(&args) {
+            if let Some(ty) = &parameter.ty {
+                self.ensure_type(value, ty, parameter.span)?;
+            }
+        }
+        if self.call_depth >= 1000 {
             return Err(self.error(
                 "Runtime Error",
                 "maximum call depth exceeded",
@@ -1585,47 +1681,346 @@ impl<'a> Evaluator<'a> {
                 "Add a stopping condition.",
             ));
         }
-        let frame_base = self.scopes.len();
-        self.push();
-        self.frame_bases.push(frame_base);
-        if let Some(receiver) = receiver {
-            self.define("self", receiver, None, true, span)?;
-        }
-        if let Some(owner) = &owner {
-            self.class_stack.push(owner.clone());
-        }
-        for (p, v) in f.params.iter().zip(args) {
-            self.define(&p.name, v, p.ty.clone(), false, p.span)?
-        }
-        let mut result = Value::None;
-        for s in &f.body.statements {
-            match self.exec(s)? {
-                Flow::Normal => {}
-                Flow::Return(v) => {
-                    result = v;
-                    break;
-                }
-                Flow::Break | Flow::Continue => {
-                    return Err(self.error(
-                        "Control Error",
-                        "loop control used outside a loop",
-                        s.span(),
-                        "break and continue only make sense inside loop.",
-                        "Move it into a loop.",
-                    ))
-                }
+        self.call_depth += 1;
+        let result = if receiver.is_none() && owner.is_none() {
+            if let Some(numeric) = &f.numeric {
+                self.call_numeric_function(numeric, args)
+            } else {
+                self.call_ast_function(&f, args, receiver, owner, span)
             }
-        }
-        self.pop();
-        self.frame_bases.pop();
-        if owner.is_some() {
-            self.class_stack.pop();
-        }
+        } else {
+            self.call_ast_function(&f, args, receiver, owner, span)
+        };
         self.call_depth -= 1;
+        let result = result?;
         if let Some(ty) = &f.return_type {
             self.ensure_type(&result, ty, span)?
         }
         Ok(result)
+    }
+
+    fn call_ast_function(
+        &mut self,
+        function: &FunctionValue,
+        args: Vec<Value>,
+        receiver: Option<Value>,
+        owner: Option<String>,
+        span: Span,
+    ) -> Result<Value, Diagnostic> {
+        let frame_base = self.scopes.len();
+        self.push();
+        self.frame_bases.push(frame_base);
+        let has_owner = owner.is_some();
+        if let Some(owner) = owner {
+            self.class_stack.push(owner);
+        }
+        let execution = (|| {
+            if let Some(receiver) = receiver {
+                self.define("self", receiver, None, true, span)?;
+            }
+            for (parameter, value) in function.params.iter().zip(args) {
+                self.define(
+                    &parameter.name,
+                    value,
+                    parameter.ty.clone(),
+                    false,
+                    parameter.span,
+                )?;
+            }
+            let mut result = Value::None;
+            for statement in &function.body.statements {
+                match self.exec(statement)? {
+                    Flow::Normal => {}
+                    Flow::Return(value) => {
+                        result = value;
+                        break;
+                    }
+                    Flow::Break | Flow::Continue => {
+                        return Err(self.error(
+                            "Control Error",
+                            "loop control used outside a loop",
+                            statement.span(),
+                            "break and continue only make sense inside loop.",
+                            "Move it into a loop.",
+                        ));
+                    }
+                }
+            }
+            Ok(result)
+        })();
+        self.pop();
+        self.frame_bases.pop();
+        if has_owner {
+            self.class_stack.pop();
+        }
+        execution
+    }
+
+    fn call_numeric_function(
+        &mut self,
+        function: &NumericFunction,
+        args: Vec<Value>,
+    ) -> Result<Value, Diagnostic> {
+        let mut integers = vec![0; function.int_locals];
+        let mut floats = vec![0.0; function.float_locals];
+        let mut int_lists = (0..function.int_list_locals)
+            .map(|_| Vec::<i64>::new())
+            .collect::<Vec<_>>();
+        for (parameter, value) in function.parameters.iter().zip(args) {
+            match (parameter, value) {
+                (NumericParameter::Int(slot), Value::Int(value)) => integers[*slot] = value,
+                (NumericParameter::Float(slot), Value::Float(value)) => floats[*slot] = value,
+                _ => unreachable!("numeric function parameters were checked before execution"),
+            }
+        }
+        match self.exec_numeric_statements(
+            &function.statements,
+            &mut integers,
+            &mut floats,
+            &mut int_lists,
+        )? {
+            NumericFlow::Normal => Ok(Value::None),
+            NumericFlow::Return(value) => Ok(value),
+        }
+    }
+
+    #[inline(always)]
+    fn exec_numeric_statements(
+        &mut self,
+        statements: &[NumericStmt],
+        integers: &mut [i64],
+        floats: &mut [f64],
+        int_lists: &mut [Vec<i64>],
+    ) -> Result<NumericFlow, Diagnostic> {
+        for statement in statements {
+            match statement {
+                NumericStmt::SetInt(slot, expression) => {
+                    integers[*slot] = self.eval_numeric_int(expression, integers, int_lists)?;
+                }
+                NumericStmt::SetFloat(slot, expression) => {
+                    floats[*slot] =
+                        self.eval_numeric_float(expression, integers, floats, int_lists)?;
+                }
+                NumericStmt::EvalInt(expression) => {
+                    self.eval_numeric_int(expression, integers, int_lists)?;
+                }
+                NumericStmt::EvalFloat(expression) => {
+                    self.eval_numeric_float(expression, integers, floats, int_lists)?;
+                }
+                NumericStmt::CreateIntList(slot) => int_lists[*slot].clear(),
+                NumericStmt::AddIntList(slot, expression) => {
+                    let value = self.eval_numeric_int(expression, integers, int_lists)?;
+                    int_lists[*slot].push(value);
+                }
+                NumericStmt::SortIntList(slot) => int_lists[*slot].sort_unstable(),
+                NumericStmt::ForRange {
+                    variable,
+                    start,
+                    end,
+                    step,
+                    body,
+                    span,
+                } => {
+                    let mut value = self.eval_numeric_int(start, integers, int_lists)?;
+                    let mut iterations = 0usize;
+                    let end = self.eval_numeric_int(end, integers, int_lists)?;
+                    let step = if let Some(step) = step {
+                        self.eval_numeric_int(step, integers, int_lists)?
+                    } else if value <= end {
+                        1
+                    } else {
+                        -1
+                    };
+                    if step == 0 {
+                        return Err(self.error(
+                            "Value Error",
+                            "range step cannot be zero",
+                            *span,
+                            "A zero step never advances.",
+                            "Use a positive or negative integer step.",
+                        ));
+                    }
+                    while if step > 0 { value < end } else { value > end } {
+                        if iterations >= MAX_LOOP_ITERATIONS {
+                            return Err(self.error(
+                                "Runtime Error",
+                                "loop iteration limit exceeded",
+                                *span,
+                                "The loop ran more than ten million times.",
+                                "Use a smaller range or split the work into batches.",
+                            ));
+                        }
+                        iterations += 1;
+                        integers[*variable] = value;
+                        if let NumericFlow::Return(value) =
+                            self.exec_numeric_statements(body, integers, floats, int_lists)?
+                        {
+                            return Ok(NumericFlow::Return(value));
+                        }
+                        value = value.checked_add(step).ok_or_else(|| {
+                            self.error(
+                                "Value Error",
+                                "range overflow",
+                                *span,
+                                "The range exceeded Int limits.",
+                                "Use a smaller range.",
+                            )
+                        })?;
+                    }
+                }
+                NumericStmt::Return(value) => {
+                    let value = match value {
+                        Some(numeric_vm::NumberExpr::Int(value)) => {
+                            Value::Int(self.eval_numeric_int(value, integers, int_lists)?)
+                        }
+                        Some(numeric_vm::NumberExpr::Float(value)) => Value::Float(
+                            self.eval_numeric_float(value, integers, floats, int_lists)?,
+                        ),
+                        None => Value::None,
+                    };
+                    return Ok(NumericFlow::Return(value));
+                }
+            }
+        }
+        Ok(NumericFlow::Normal)
+    }
+
+    #[inline(always)]
+    fn eval_numeric_int(
+        &mut self,
+        expression: &VmIntExpr,
+        integers: &[i64],
+        int_lists: &[Vec<i64>],
+    ) -> Result<i64, Diagnostic> {
+        match expression {
+            VmIntExpr::Literal(value) => Ok(*value),
+            VmIntExpr::Local(slot) => Ok(integers[*slot]),
+            VmIntExpr::Global(name, span) => match self.get_cached(name) {
+                Some(Value::Int(value)) => Ok(value),
+                Some(value) => Err(self.type_error(*span, "an Int", &value)),
+                None => Err(self.unknown(name, *span)),
+            },
+            VmIntExpr::Negate(value, span) => self
+                .eval_numeric_int(value, integers, int_lists)?
+                .checked_neg()
+                .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
+            VmIntExpr::Add(left, right, span) => self
+                .eval_numeric_int(left, integers, int_lists)?
+                .checked_add(self.eval_numeric_int(right, integers, int_lists)?)
+                .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
+            VmIntExpr::Subtract(left, right, span) => self
+                .eval_numeric_int(left, integers, int_lists)?
+                .checked_sub(self.eval_numeric_int(right, integers, int_lists)?)
+                .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
+            VmIntExpr::Multiply(left, right, span) => self
+                .eval_numeric_int(left, integers, int_lists)?
+                .checked_mul(self.eval_numeric_int(right, integers, int_lists)?)
+                .ok_or_else(|| integer_overflow(*span, self.file, self.source)),
+            VmIntExpr::IntegerDivide(left, right, span) => {
+                let left = self.eval_numeric_int(left, integers, int_lists)?;
+                let right = self.eval_numeric_int(right, integers, int_lists)?;
+                if right == 0 {
+                    return Err(self.zero(*span));
+                }
+                left.checked_div(right)
+                    .ok_or_else(|| integer_overflow(*span, self.file, self.source))
+            }
+            VmIntExpr::Remainder(left, right, span) => {
+                let left = self.eval_numeric_int(left, integers, int_lists)?;
+                let right = self.eval_numeric_int(right, integers, int_lists)?;
+                if right == 0 {
+                    return Err(self.zero(*span));
+                }
+                left.checked_rem(right)
+                    .ok_or_else(|| integer_overflow(*span, self.file, self.source))
+            }
+            VmIntExpr::ListIndex(slot, index, span) => {
+                let index = self.eval_numeric_int(index, integers, int_lists)?;
+                let values = &int_lists[*slot];
+                let Some(index) = normalize_index(index, values.len()) else {
+                    return Err(self.index_error(*span, index, values.len()));
+                };
+                Ok(values[index])
+            }
+            VmIntExpr::ListLength(slot) => Ok(int_lists[*slot].len() as i64),
+        }
+    }
+
+    #[inline(always)]
+    fn eval_numeric_float(
+        &mut self,
+        expression: &VmFloatExpr,
+        integers: &[i64],
+        floats: &[f64],
+        int_lists: &[Vec<i64>],
+    ) -> Result<f64, Diagnostic> {
+        match expression {
+            VmFloatExpr::Literal(value) => Ok(*value),
+            VmFloatExpr::Local(slot) => Ok(floats[*slot]),
+            VmFloatExpr::Global(name, span) => match self.get_cached(name) {
+                Some(Value::Float(value)) => Ok(value),
+                Some(Value::Int(value)) => Ok(value as f64),
+                Some(value) => Err(self.type_error(*span, "a Number", &value)),
+                None => Err(self.unknown(name, *span)),
+            },
+            VmFloatExpr::FromInt(value) => {
+                Ok(self.eval_numeric_int(value, integers, int_lists)? as f64)
+            }
+            VmFloatExpr::Negate(value) => {
+                Ok(-self.eval_numeric_float(value, integers, floats, int_lists)?)
+            }
+            VmFloatExpr::Add(left, right) => Ok(self
+                .eval_numeric_float(left, integers, floats, int_lists)?
+                + self.eval_numeric_float(right, integers, floats, int_lists)?),
+            VmFloatExpr::Subtract(left, right) => Ok(self
+                .eval_numeric_float(left, integers, floats, int_lists)?
+                - self.eval_numeric_float(right, integers, floats, int_lists)?),
+            VmFloatExpr::Multiply(left, right) => Ok(self
+                .eval_numeric_float(left, integers, floats, int_lists)?
+                * self.eval_numeric_float(right, integers, floats, int_lists)?),
+            VmFloatExpr::Divide(left, right, span) => {
+                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
+                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                if right == 0.0 {
+                    return Err(self.zero(*span));
+                }
+                Ok(left / right)
+            }
+            VmFloatExpr::IntegerDivide(left, right, span) => {
+                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
+                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                if right == 0.0 {
+                    return Err(self.zero(*span));
+                }
+                Ok((left / right).floor())
+            }
+            VmFloatExpr::Remainder(left, right, span) => {
+                let left = self.eval_numeric_float(left, integers, floats, int_lists)?;
+                let right = self.eval_numeric_float(right, integers, floats, int_lists)?;
+                if right == 0.0 {
+                    return Err(self.zero(*span));
+                }
+                Ok(left % right)
+            }
+            VmFloatExpr::Power(left, right) => Ok(self
+                .eval_numeric_float(left, integers, floats, int_lists)?
+                .powf(self.eval_numeric_float(right, integers, floats, int_lists)?)),
+            VmFloatExpr::Math(operation, value, span) => {
+                let value = self.eval_numeric_float(value, integers, floats, int_lists)?;
+                let output = operation.apply(value);
+                if output.is_nan() {
+                    Err(self.error(
+                        "Math Error",
+                        format!("{} produced an invalid result", operation.name()),
+                        *span,
+                        "The input is outside the real-number domain.",
+                        "Use a value in the function's valid domain.",
+                    ))
+                } else {
+                    Ok(output)
+                }
+            }
+        }
     }
 
     fn instantiate(
@@ -1692,6 +2087,15 @@ impl<'a> Evaluator<'a> {
         let Value::List(items, frozen) = obj else {
             return Err(self.type_error(span, "a List or Object before the method", &obj));
         };
+        if name == "add" && !frozen && args.iter().any(|value| list_would_cycle(&items, value)) {
+            return Err(self.error(
+                "Value Error",
+                "cannot create a cyclic List",
+                span,
+                "Cyclic Lists make copying and comparison unsafe.",
+                "Store a scalar value or a separate copy instead.",
+            ));
+        }
         let mut v = items.borrow_mut();
         match name{
         "add"=>{
@@ -2139,6 +2543,38 @@ impl<'a> Evaluator<'a> {
         Ok(Value::String(out))
     }
 
+    fn freeze_value(
+        &self,
+        value: Value,
+        span: Span,
+        active: &mut StdHashSet<usize>,
+    ) -> Result<Value, Diagnostic> {
+        match value {
+            Value::List(items, _) => {
+                let pointer = Rc::as_ptr(&items) as usize;
+                if !active.insert(pointer) {
+                    return Err(self.error(
+                        "Value Error",
+                        "cannot freeze a cyclic List",
+                        span,
+                        "const creates an independent immutable copy, but this List contains itself.",
+                        "Break the cycle before assigning the List to const.",
+                    ));
+                }
+                let result = items
+                    .borrow()
+                    .iter()
+                    .cloned()
+                    .map(|item| self.freeze_value(item, span, active))
+                    .collect::<Result<Vec<_>, _>>();
+                active.remove(&pointer);
+                Ok(Value::List(Rc::new(RefCell::new(result?)), true))
+            }
+            Value::Instance(instance, _) => Ok(Value::Instance(instance, true)),
+            value => Ok(value),
+        }
+    }
+
     fn slice(
         &self,
         obj: Value,
@@ -2326,10 +2762,17 @@ impl<'a> Evaluator<'a> {
         }
     }
     fn get(&self, n: &str) -> Option<Binding> {
+        let frame_base = *self.frame_bases.last().unwrap_or(&2);
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(n).cloned())
+            .enumerate()
+            .find_map(|(reverse_index, scope)| {
+                let index = self.scopes.len() - reverse_index - 1;
+                (index <= 1 || index >= frame_base)
+                    .then(|| scope.get(n).cloned())
+                    .flatten()
+            })
     }
     fn get_cached(&mut self, name: &str) -> Option<Value> {
         let (scope, slot) = self.binding_location_cached(name)?;
@@ -2371,6 +2814,17 @@ impl<'a> Evaluator<'a> {
             return None;
         };
         let frame_base = *self.frame_bases.last().unwrap();
+        // A function may see globals, but never the private locals of its
+        // caller. Returning the caller's slot here would turn the evaluator
+        // into dynamic-scope lookup and could expose data across call frames.
+        if scope > 1 && scope < frame_base {
+            self.binding_cache[cache_index] = BindingCacheEntry {
+                key,
+                generation: self.binding_cache_generation,
+                location: CachedLocation::Missing,
+            };
+            return None;
+        }
         let location = if scope <= 1 {
             Some(CachedLocation::Absolute { scope, slot })
         } else if scope >= frame_base {
@@ -2398,21 +2852,17 @@ impl<'a> Evaluator<'a> {
         }
     }
     fn binding_scope(&self, name: &str) -> Option<usize> {
-        (0..self.scopes.len())
-            .rev()
-            .find(|scope| self.scopes[*scope].contains_key(name))
+        let frame_base = *self.frame_bases.last().unwrap_or(&2);
+        (0..self.scopes.len()).rev().find(|scope| {
+            (*scope <= 1 || *scope >= frame_base) && self.scopes[*scope].contains_key(name)
+        })
     }
     fn push(&mut self) {
+        self.invalidate_binding_cache();
         self.scopes.push(Scope::default())
     }
     fn pop(&mut self) {
-        if self
-            .scopes
-            .last()
-            .is_some_and(|scope| !scope.bindings.is_empty())
-        {
-            self.invalidate_binding_cache();
-        }
+        self.invalidate_binding_cache();
         self.scopes.pop();
     }
     fn error(
@@ -2584,6 +3034,61 @@ fn normalize_index(i: i64, len: usize) -> Option<usize> {
         None
     }
 }
+
+fn list_would_cycle(target: &Rc<RefCell<Vec<Value>>>, value: &Value) -> bool {
+    let target = Rc::as_ptr(target) as usize;
+    let mut pending = vec![value.clone()];
+    let mut seen = StdHashSet::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::List(items, _) => {
+                let pointer = Rc::as_ptr(&items) as usize;
+                if pointer == target {
+                    return true;
+                }
+                if seen.insert((0, pointer)) {
+                    pending.extend(items.borrow().iter().cloned());
+                }
+            }
+            Value::Instance(instance, _) => {
+                let pointer = Rc::as_ptr(&instance) as usize;
+                if seen.insert((1, pointer)) {
+                    pending.extend(instance.borrow().fields.values().cloned());
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn value_reaches_instance(target: &Rc<RefCell<InstanceValue>>, value: &Value) -> bool {
+    let target = Rc::as_ptr(target) as usize;
+    let mut pending = vec![value.clone()];
+    let mut seen = StdHashSet::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::List(items, _) => {
+                let pointer = Rc::as_ptr(&items) as usize;
+                if seen.insert((0, pointer)) {
+                    pending.extend(items.borrow().iter().cloned());
+                }
+            }
+            Value::Instance(instance, _) => {
+                let pointer = Rc::as_ptr(&instance) as usize;
+                if pointer == target {
+                    return true;
+                }
+                if seen.insert((1, pointer)) {
+                    pending.extend(instance.borrow().fields.values().cloned());
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn slice_bounds(
     a: Option<i64>,
     z: Option<i64>,
@@ -2622,7 +3127,26 @@ fn repeat_string(s: String, n: i64, span: Span, e: &Evaluator) -> Result<Value, 
             "Use zero or a positive Int.",
         ));
     }
-    Ok(Value::String(s.repeat(n as usize)))
+    let count = n as usize;
+    let bytes = s.len().checked_mul(count).ok_or_else(|| {
+        e.error(
+            "Value Error",
+            "string repetition is too large",
+            span,
+            "The requested result would exceed the available size range.",
+            "Use a smaller repeat count or a shorter string.",
+        )
+    })?;
+    if bytes > 256 * 1024 * 1024 {
+        return Err(e.error(
+            "Value Error",
+            "string repetition is too large",
+            span,
+            "Shine limits one repeated String to 256 MiB to prevent memory exhaustion.",
+            "Use a smaller repeat count or build the output incrementally.",
+        ));
+    }
+    Ok(Value::String(s.repeat(count)))
 }
 fn repeat_list(
     v: Rc<RefCell<Vec<Value>>>,
@@ -2640,8 +3164,27 @@ fn repeat_list(
         ));
     }
     let original = v.borrow();
-    let mut repeated = Vec::with_capacity(original.len().saturating_mul(n as usize));
-    for _ in 0..n {
+    let count = n as usize;
+    let total = original.len().checked_mul(count).ok_or_else(|| {
+        e.error(
+            "Value Error",
+            "List repetition is too large",
+            span,
+            "The requested result would exceed the available size range.",
+            "Use a smaller repeat count or a shorter List.",
+        )
+    })?;
+    if total > 25_000_000 {
+        return Err(e.error(
+            "Value Error",
+            "List repetition is too large",
+            span,
+            "Shine limits one repeated List to 25 million elements to prevent memory exhaustion.",
+            "Use a smaller repeat count or process the data in chunks.",
+        ));
+    }
+    let mut repeated = Vec::with_capacity(total);
+    for _ in 0..count {
         repeated.extend(original.iter().cloned());
     }
     Ok(Value::List(Rc::new(RefCell::new(repeated)), false))
