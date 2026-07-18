@@ -52,19 +52,78 @@ pub enum Value {
     Float(f64),
     String(String),
     List(Rc<RefCell<Vec<Value>>>, bool),
+    Dictionary(Rc<RefCell<DictionaryValue>>, bool),
     Range(i64, i64),
     Function(Rc<FunctionValue>),
     Class(Rc<ClassValue>),
     Instance(Rc<RefCell<InstanceValue>>, bool),
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 enum ScalarKey {
     None,
     Bool(bool),
     Int(i64),
     Float(u64),
     String(String),
+}
+
+#[derive(Clone)]
+struct DictionaryEntry {
+    key: Value,
+    value: Value,
+}
+
+pub struct DictionaryValue {
+    entries: Vec<DictionaryEntry>,
+    index: HashMap<ScalarKey, usize>,
+    key_type: Option<TypeRef>,
+    value_type: Option<TypeRef>,
+}
+
+impl DictionaryValue {
+    fn empty() -> Self {
+        Self {
+            entries: vec![],
+            index: HashMap::default(),
+            key_type: None,
+            value_type: None,
+        }
+    }
+
+    fn position(&self, key: &ScalarKey) -> Option<usize> {
+        self.index.get(key).copied()
+    }
+
+    fn insert(&mut self, scalar: ScalarKey, key: Value, value: Value) -> bool {
+        if let Some(position) = self.position(&scalar) {
+            self.entries[position].value = value;
+            false
+        } else {
+            let position = self.entries.len();
+            self.entries.push(DictionaryEntry { key, value });
+            self.index.insert(scalar, position);
+            true
+        }
+    }
+
+    fn remove(&mut self, key: &ScalarKey) -> bool {
+        let Some(position) = self.index.remove(key) else {
+            return false;
+        };
+        self.entries.remove(position);
+        for index in self.index.values_mut() {
+            if *index > position {
+                *index -= 1;
+            }
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.index.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -109,6 +168,7 @@ impl Value {
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::List(..) => "List",
+            Self::Dictionary(..) => "Dictionary",
             Self::Range(..) => "Range",
             Self::Function(_) => "Function",
             Self::Class(_) => "Class",
@@ -123,6 +183,7 @@ impl Value {
             Self::Float(v) => *v != 0.0,
             Self::String(v) => !v.is_empty(),
             Self::List(v, _) => !v.borrow().is_empty(),
+            Self::Dictionary(v, _) => !v.borrow().entries.is_empty(),
             Self::Range(a, b) => a != b,
             Self::Function(_) => true,
             Self::Class(_) | Self::Instance(..) => true,
@@ -135,10 +196,10 @@ impl fmt::Display for Value {
         fn display(
             value: &Value,
             f: &mut fmt::Formatter<'_>,
-            active: &mut StdHashSet<usize>,
+            active: &mut StdHashSet<(u8, usize)>,
         ) -> fmt::Result {
             if let Value::List(items, _) = value {
-                let pointer = Rc::as_ptr(items) as usize;
+                let pointer = (0, Rc::as_ptr(items) as usize);
                 if !active.insert(pointer) {
                     return write!(f, "[<cycle>]");
                 }
@@ -154,6 +215,31 @@ impl fmt::Display for Value {
                 }
                 active.remove(&pointer);
                 return write!(f, "]");
+            }
+            if let Value::Dictionary(dictionary, _) = value {
+                let pointer = (1, Rc::as_ptr(dictionary) as usize);
+                if !active.insert(pointer) {
+                    return write!(f, "{{<cycle>}}");
+                }
+                write!(f, "{{")?;
+                for (index, entry) in dictionary.borrow().entries.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if let Value::String(text) = &entry.key {
+                        write!(f, "\"{text}\"")?;
+                    } else {
+                        display(&entry.key, f, active)?;
+                    }
+                    write!(f, ": ")?;
+                    if let Value::String(text) = &entry.value {
+                        write!(f, "\"{text}\"")?;
+                    } else {
+                        display(&entry.value, f, active)?;
+                    }
+                }
+                active.remove(&pointer);
+                return write!(f, "}}");
             }
             match value {
                 Value::None => write!(f, "none"),
@@ -174,6 +260,9 @@ impl fmt::Display for Value {
                 }
                 Value::String(v) => write!(f, "{v}"),
                 Value::List(..) => unreachable!("lists are handled before scalar formatting"),
+                Value::Dictionary(..) => {
+                    unreachable!("dictionaries are handled before scalar formatting")
+                }
                 Value::Range(a, b) => write!(f, "{a}..{b}"),
                 Value::Function(_) => write!(f, "<function>"),
                 Value::Class(class) => write!(f, "<class {}>", class.name),
@@ -188,9 +277,9 @@ impl fmt::Display for Value {
 
 impl PartialEq for Value {
     fn eq(&self, o: &Self) -> bool {
-        fn equal(a: &Value, b: &Value, seen: &mut StdHashSet<(usize, usize)>) -> bool {
+        fn equal(a: &Value, b: &Value, seen: &mut StdHashSet<(u8, usize, usize)>) -> bool {
             if let (Value::List(left, _), Value::List(right, _)) = (a, b) {
-                let pair = (Rc::as_ptr(left) as usize, Rc::as_ptr(right) as usize);
+                let pair = (0, Rc::as_ptr(left) as usize, Rc::as_ptr(right) as usize);
                 if !seen.insert(pair) {
                     return true;
                 }
@@ -201,6 +290,25 @@ impl PartialEq for Value {
                         .iter()
                         .zip(right_values.iter())
                         .all(|(left, right)| equal(left, right, seen));
+            }
+            if let (Value::Dictionary(left, _), Value::Dictionary(right, _)) = (a, b) {
+                let pair = (1, Rc::as_ptr(left) as usize, Rc::as_ptr(right) as usize);
+                if !seen.insert(pair) {
+                    return true;
+                }
+                let left = left.borrow();
+                let right = right.borrow();
+                if left.entries.len() != right.entries.len() {
+                    return false;
+                }
+                return left.entries.iter().all(|entry| {
+                    let Some(position) =
+                        scalar_key(&entry.key).and_then(|key| right.position(&key))
+                    else {
+                        return false;
+                    };
+                    equal(&entry.value, &right.entries[position].value, seen)
+                });
             }
             match (a, b) {
                 (Value::None, Value::None) => true,
@@ -216,6 +324,9 @@ impl PartialEq for Value {
                 (Value::String(a), Value::String(b)) => a == b,
                 (Value::List(..), Value::List(..)) => {
                     unreachable!("lists are handled before scalar equality")
+                }
+                (Value::Dictionary(..), Value::Dictionary(..)) => {
+                    unreachable!("dictionaries are handled before scalar equality")
                 }
                 (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
                 (Value::Instance(a, _), Value::Instance(b, _)) => Rc::ptr_eq(a, b),
@@ -610,6 +721,12 @@ impl<'a> Evaluator<'a> {
                             Value::List(values, _) => {
                                 values.borrow().first().cloned().unwrap_or(Value::None)
                             }
+                            Value::Dictionary(dictionary, _) => dictionary
+                                .borrow()
+                                .entries
+                                .first()
+                                .map(|entry| entry.key.clone())
+                                .unwrap_or(Value::None),
                             Value::String(_) => Value::String(String::new()),
                             Value::Range(_, _) => Value::Int(0),
                             _ => Value::None,
@@ -662,7 +779,7 @@ impl<'a> Evaluator<'a> {
                 }
                 let mut v = self.eval(value)?;
                 if *constant {
-                    v = self.freeze_value(v, *span, &mut StdHashSet::new())?;
+                    v = self.freeze_value(v, *span, &mut HashMap::default())?;
                 }
                 self.assign_target(target, ty.clone(), v, *constant, *op, *span)?;
                 Ok(Flow::Normal)
@@ -781,6 +898,15 @@ impl<'a> Evaluator<'a> {
                     Value::List(values, _) => {
                         let values = values.borrow().clone();
                         self.exec_for_values(name, values, b, span)
+                    }
+                    Value::Dictionary(dictionary, _) => {
+                        let keys = dictionary
+                            .borrow()
+                            .entries
+                            .iter()
+                            .map(|entry| entry.key.clone())
+                            .collect::<Vec<_>>();
+                        self.exec_for_values(name, keys, b, span)
                     }
                     Value::String(value) => self.exec_for_values(
                         name,
@@ -968,7 +1094,7 @@ impl<'a> Evaluator<'a> {
                 Ok(())
             }
             AssignTarget::Index(object, index, target_span) => {
-                let expected_item = if let Expr::Name(name, _) = object.as_ref() {
+                let expected_list_item = if let Expr::Name(name, _) = object.as_ref() {
                     self.get(name).and_then(|binding| match binding.ty {
                         Some(TypeRef::List(Some(item))) => Some(*item),
                         _ => None,
@@ -976,31 +1102,69 @@ impl<'a> Evaluator<'a> {
                 } else {
                     None
                 };
-                if let Some(expected) = &expected_item {
-                    self.ensure_type(&value, expected, *target_span)?;
-                }
                 let obj = self.eval(object)?;
-                let idx = as_int(self.eval(index)?, index.span(), self)?;
-                let Value::List(items, frozen) = obj else {
-                    return Err(self.type_error(*target_span, "a List", &obj));
-                };
-                if frozen {
-                    return Err(self.const_error(*target_span));
+                let key = self.eval(index)?;
+                match obj {
+                    Value::List(items, frozen) => {
+                        if frozen {
+                            return Err(self.const_error(*target_span));
+                        }
+                        if let Some(expected) = &expected_list_item {
+                            self.ensure_type(&value, expected, *target_span)?;
+                        }
+                        if list_would_cycle(&items, &value) {
+                            return Err(self.error(
+                                "Value Error",
+                                "cannot create a cyclic List",
+                                *target_span,
+                                "Cyclic Lists make copying and comparison unsafe.",
+                                "Store a scalar value or a separate copy instead.",
+                            ));
+                        }
+                        let idx = as_int(key, index.span(), self)?;
+                        let mut values = items.borrow_mut();
+                        let i = normalize_index(idx, values.len())
+                            .ok_or_else(|| self.index_error(*target_span, idx, values.len()))?;
+                        let value = if matches!(op, AssignOp::Set) {
+                            value
+                        } else {
+                            self.compound_value(values[i].clone(), op, value, span)?
+                        };
+                        values[i] = value;
+                        Ok(())
+                    }
+                    Value::Dictionary(dictionary, frozen) => {
+                        if frozen {
+                            return Err(self.const_error(*target_span));
+                        }
+                        let scalar = dictionary_key(&key, index.span(), self)?;
+                        let (key_type, value_type, position) = {
+                            let dictionary = dictionary.borrow();
+                            (
+                                dictionary.key_type.clone(),
+                                dictionary.value_type.clone(),
+                                dictionary.position(&scalar),
+                            )
+                        };
+                        if let Some(expected) = &key_type {
+                            self.ensure_type(&key, expected, index.span())?;
+                        }
+                        if let Some(expected) = &value_type {
+                            self.ensure_type(&value, expected, *target_span)?;
+                        }
+                        let value = if matches!(op, AssignOp::Set) {
+                            value
+                        } else {
+                            let position =
+                                position.ok_or_else(|| self.key_error(*target_span, &key))?;
+                            let old = dictionary.borrow().entries[position].value.clone();
+                            self.compound_value(old, op, value, span)?
+                        };
+                        dictionary.borrow_mut().insert(scalar, key, value);
+                        Ok(())
+                    }
+                    value => Err(self.type_error(*target_span, "a List or Dictionary", &value)),
                 }
-                if list_would_cycle(&items, &value) {
-                    return Err(self.error(
-                        "Value Error",
-                        "cannot create a cyclic List",
-                        *target_span,
-                        "Cyclic Lists make copying and comparison unsafe.",
-                        "Store a scalar value or a separate copy instead.",
-                    ));
-                }
-                let mut values = items.borrow_mut();
-                let i = normalize_index(idx, values.len())
-                    .ok_or_else(|| self.index_error(*target_span, idx, values.len()))?;
-                values[i] = value;
-                Ok(())
             }
             AssignTarget::Member(object, name, target_span) => {
                 let object = self.eval(object)?;
@@ -1376,6 +1540,26 @@ impl<'a> Evaluator<'a> {
                 )),
                 false,
             )),
+            Expr::Dictionary(entries, span) => {
+                let mut dictionary = DictionaryValue::empty();
+                for (key_expression, value_expression) in entries {
+                    let key = self.eval(key_expression)?;
+                    let scalar = dictionary_key(&key, key_expression.span(), self)?;
+                    if dictionary.position(&scalar).is_some() {
+                        return Err(self.error(
+                            "Key Error",
+                            format!("duplicate Dictionary key {}", dictionary_key_display(&key)),
+                            key_expression.span(),
+                            "A Dictionary literal may define each key only once.",
+                            "Remove the duplicate entry or use a different key.",
+                        ));
+                    }
+                    let value = self.eval(value_expression)?;
+                    dictionary.insert(scalar, key, value);
+                }
+                let _ = span;
+                Ok(Value::Dictionary(Rc::new(RefCell::new(dictionary)), false))
+            }
             Expr::Name(n, s) => self.get_cached(n).ok_or_else(|| self.unknown(n, *s)),
             Expr::Unary { op, value, span } => {
                 let v = self.eval(value)?;
@@ -1441,15 +1625,17 @@ impl<'a> Evaluator<'a> {
                 span,
             } => {
                 let obj = self.eval(object)?;
-                let idx = as_int(self.eval(index)?, index.span(), self)?;
+                let key = self.eval(index)?;
                 match obj {
                     Value::List(v, _) => {
+                        let idx = as_int(key, index.span(), self)?;
                         let values = v.borrow();
                         let i = normalize_index(idx, values.len())
                             .ok_or_else(|| self.index_error(*span, idx, values.len()))?;
                         Ok(values[i].clone())
                     }
                     Value::String(v) => {
+                        let idx = as_int(key, index.span(), self)?;
                         if idx >= 0 {
                             if let Ok(index) = usize::try_from(idx) {
                                 if let Some(character) = v.chars().nth(index) {
@@ -1462,7 +1648,15 @@ impl<'a> Evaluator<'a> {
                             .ok_or_else(|| self.index_error(*span, idx, len))?;
                         Ok(Value::String(v.chars().nth(i).unwrap().to_string()))
                     }
-                    v => Err(self.type_error(*span, "a List or String", &v)),
+                    Value::Dictionary(dictionary, _) => {
+                        let scalar = dictionary_key(&key, index.span(), self)?;
+                        let dictionary = dictionary.borrow();
+                        let position = dictionary
+                            .position(&scalar)
+                            .ok_or_else(|| self.key_error(*span, &key))?;
+                        Ok(dictionary.entries[position].value.clone())
+                    }
+                    v => Err(self.type_error(*span, "a List, String, or Dictionary", &v)),
                 }
             }
             Expr::Slice {
@@ -1594,6 +1788,10 @@ impl<'a> Evaluator<'a> {
             And | Or => unreachable!(),
             In => match r {
                 Value::List(v, _) => Ok(Value::Bool(v.borrow().contains(&l))),
+                Value::Dictionary(dictionary, _) => {
+                    let key = dictionary_key(&l, span, self)?;
+                    Ok(Value::Bool(dictionary.borrow().position(&key).is_some()))
+                }
                 Value::String(s) => {
                     if let Value::String(x) = l {
                         Ok(Value::Bool(s.contains(&x)))
@@ -1601,7 +1799,7 @@ impl<'a> Evaluator<'a> {
                         Err(self.type_error(span, "a String membership value", &l))
                     }
                 }
-                v => Err(self.type_error(span, "a List or String after `in`", &v)),
+                v => Err(self.type_error(span, "a List, String, or Dictionary after `in`", &v)),
             },
             Add => match (l, r) {
                 (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
@@ -1717,6 +1915,27 @@ impl<'a> Evaluator<'a> {
                 }))
             }
         }
+    }
+
+    fn compound_value(
+        &self,
+        left: Value,
+        operation: AssignOp,
+        right: Value,
+        span: Span,
+    ) -> Result<Value, Diagnostic> {
+        self.binary(
+            left,
+            match operation {
+                AssignOp::Add => BinaryOp::Add,
+                AssignOp::Subtract => BinaryOp::Subtract,
+                AssignOp::Multiply => BinaryOp::Multiply,
+                AssignOp::Divide => BinaryOp::Divide,
+                AssignOp::Set => unreachable!(),
+            },
+            right,
+            span,
+        )
     }
 
     fn call_named(&mut self, n: &str, args: Vec<Value>, span: Span) -> Result<Value, Diagnostic> {
@@ -2625,8 +2844,15 @@ impl<'a> Evaluator<'a> {
                 span,
             );
         }
+        if let Value::Dictionary(dictionary, frozen) = &obj {
+            return self.dictionary_member(dictionary.clone(), *frozen, name, args, span);
+        }
         let Value::List(items, frozen) = obj else {
-            return Err(self.type_error(span, "a List or Object before the method", &obj));
+            return Err(self.type_error(
+                span,
+                "a List, Dictionary, or Object before the method",
+                &obj,
+            ));
         };
         if name == "add" && !frozen && args.iter().any(|value| list_would_cycle(&items, value)) {
             return Err(self.error(
@@ -2662,6 +2888,137 @@ impl<'a> Evaluator<'a> {
         "sum"|"product"|"min"|"max"|"mean"|"median"|"mode"|"variance"|"std"=>{zero_args(&args,span,name,self)?;aggregate(name,&v,span,self)},
         _=>Err(self.error("Name Error",format!("List has no method `{name}`"),span,"The requested list method does not exist.","Use add, del, remove, have, index, len, clear, copy, unique, reverse, sort, sum, min, max, or mean.")),
     }
+    }
+
+    fn dictionary_member(
+        &self,
+        dictionary: Rc<RefCell<DictionaryValue>>,
+        frozen: bool,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, Diagnostic> {
+        let expected_arguments = match name {
+            "have" | "remove" => Some((1, 1)),
+            "get" => Some((1, 2)),
+            "len" | "clear" | "copy" | "keys" | "values" | "items" => Some((0, 0)),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            self.error(
+                "Name Error",
+                format!("Dictionary has no method `{name}`"),
+                span,
+                "The requested Dictionary method does not exist.",
+                "Use have, get, remove, len, clear, copy, keys, values, or items.",
+            )
+        })?;
+        if args.len() < expected_arguments.0 || args.len() > expected_arguments.1 {
+            let expected = if expected_arguments.0 == expected_arguments.1 {
+                expected_arguments.0.to_string()
+            } else {
+                format!("{} or {}", expected_arguments.0, expected_arguments.1)
+            };
+            return Err(self.error(
+                "Argument Error",
+                format!(
+                    "{name} expects {expected} argument(s), received {}",
+                    args.len()
+                ),
+                span,
+                "The Dictionary method has the wrong number of arguments.",
+                "Adjust the arguments to match the method.",
+            ));
+        }
+
+        if let Some(key) = args.first() {
+            let expected = dictionary.borrow().key_type.clone();
+            if let Some(expected) = &expected {
+                self.ensure_type(key, expected, span)?;
+            }
+            dictionary_key(key, span, self)?;
+        }
+
+        match name {
+            "have" => {
+                let key = dictionary_key(&args[0], span, self)?;
+                Ok(Value::Bool(dictionary.borrow().position(&key).is_some()))
+            }
+            "get" => {
+                let key = dictionary_key(&args[0], span, self)?;
+                let dictionary = dictionary.borrow();
+                Ok(dictionary
+                    .position(&key)
+                    .map(|position| dictionary.entries[position].value.clone())
+                    .unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::None)))
+            }
+            "remove" => {
+                if frozen {
+                    return Err(self.const_error(span));
+                }
+                let key = dictionary_key(&args[0], span, self)?;
+                Ok(Value::Bool(dictionary.borrow_mut().remove(&key)))
+            }
+            "len" => Ok(Value::Int(dictionary.borrow().entries.len() as i64)),
+            "clear" => {
+                if frozen {
+                    return Err(self.const_error(span));
+                }
+                dictionary.borrow_mut().clear();
+                Ok(Value::None)
+            }
+            "copy" => {
+                let dictionary = dictionary.borrow();
+                Ok(Value::Dictionary(
+                    Rc::new(RefCell::new(DictionaryValue {
+                        entries: dictionary.entries.clone(),
+                        index: dictionary.index.clone(),
+                        key_type: dictionary.key_type.clone(),
+                        value_type: dictionary.value_type.clone(),
+                    })),
+                    false,
+                ))
+            }
+            "keys" => Ok(Value::List(
+                Rc::new(RefCell::new(
+                    dictionary
+                        .borrow()
+                        .entries
+                        .iter()
+                        .map(|entry| entry.key.clone())
+                        .collect(),
+                )),
+                false,
+            )),
+            "values" => Ok(Value::List(
+                Rc::new(RefCell::new(
+                    dictionary
+                        .borrow()
+                        .entries
+                        .iter()
+                        .map(|entry| entry.value.clone())
+                        .collect(),
+                )),
+                false,
+            )),
+            "items" => Ok(Value::List(
+                Rc::new(RefCell::new(
+                    dictionary
+                        .borrow()
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            Value::List(
+                                Rc::new(RefCell::new(vec![entry.key.clone(), entry.value.clone()])),
+                                false,
+                            )
+                        })
+                        .collect(),
+                )),
+                false,
+            )),
+            _ => unreachable!(),
+        }
     }
 
     fn call_builtin(&mut self, n: &str, a: Vec<Value>, span: Span) -> Result<Value, Diagnostic> {
@@ -2737,8 +3094,9 @@ impl<'a> Evaluator<'a> {
                 one_arg(&a, span, n, self)?;
                 match &a[0] {
                     Value::List(v, _) => Ok(Value::Int(v.borrow().len() as i64)),
+                    Value::Dictionary(v, _) => Ok(Value::Int(v.borrow().entries.len() as i64)),
                     Value::String(v) => Ok(Value::Int(v.chars().count() as i64)),
-                    v => Err(self.type_error(span, "a List or String", v)),
+                    v => Err(self.type_error(span, "a List, Dictionary, or String", v)),
                 }
             }
             "type" => {
@@ -3112,28 +3470,52 @@ impl<'a> Evaluator<'a> {
         &self,
         value: Value,
         span: Span,
-        active: &mut StdHashSet<usize>,
+        memo: &mut HashMap<(u8, usize), Value>,
     ) -> Result<Value, Diagnostic> {
         match value {
             Value::List(items, _) => {
-                let pointer = Rc::as_ptr(&items) as usize;
-                if !active.insert(pointer) {
-                    return Err(self.error(
-                        "Value Error",
-                        "cannot freeze a cyclic List",
-                        span,
-                        "const creates an independent immutable copy, but this List contains itself.",
-                        "Break the cycle before assigning the List to const.",
-                    ));
+                let identity = (0, Rc::as_ptr(&items) as usize);
+                if let Some(frozen) = memo.get(&identity) {
+                    return Ok(frozen.clone());
                 }
-                let result = items
-                    .borrow()
-                    .iter()
-                    .cloned()
-                    .map(|item| self.freeze_value(item, span, active))
-                    .collect::<Result<Vec<_>, _>>();
-                active.remove(&pointer);
-                Ok(Value::List(Rc::new(RefCell::new(result?)), true))
+                let target = Rc::new(RefCell::new(vec![]));
+                let frozen = Value::List(target.clone(), true);
+                memo.insert(identity, frozen.clone());
+                let source = items.borrow().clone();
+                let values = source
+                    .into_iter()
+                    .map(|item| self.freeze_value(item, span, memo))
+                    .collect::<Result<Vec<_>, _>>()?;
+                target.borrow_mut().extend(values);
+                Ok(frozen)
+            }
+            Value::Dictionary(dictionary, _) => {
+                let identity = (1, Rc::as_ptr(&dictionary) as usize);
+                if let Some(frozen) = memo.get(&identity) {
+                    return Ok(frozen.clone());
+                }
+                let (entries, key_type, value_type) = {
+                    let source = dictionary.borrow();
+                    (
+                        source.entries.clone(),
+                        source.key_type.clone(),
+                        source.value_type.clone(),
+                    )
+                };
+                let target = Rc::new(RefCell::new(DictionaryValue {
+                    entries: vec![],
+                    index: HashMap::default(),
+                    key_type,
+                    value_type,
+                }));
+                let frozen = Value::Dictionary(target.clone(), true);
+                memo.insert(identity, frozen.clone());
+                for entry in entries {
+                    let scalar = dictionary_key(&entry.key, span, self)?;
+                    let value = self.freeze_value(entry.value, span, memo)?;
+                    target.borrow_mut().insert(scalar, entry.key, value);
+                }
+                Ok(frozen)
             }
             Value::Instance(instance, _) => Ok(Value::Instance(instance, true)),
             value => Ok(value),
@@ -3294,6 +3676,16 @@ impl<'a> Evaluator<'a> {
         Ok(optimized)
     }
     fn ensure_type(&self, v: &Value, t: &TypeRef, span: Span) -> Result<(), Diagnostic> {
+        self.ensure_type_inner(v, t, span, &mut StdHashSet::new())
+    }
+
+    fn ensure_type_inner(
+        &self,
+        v: &Value,
+        t: &TypeRef,
+        span: Span,
+        active: &mut StdHashSet<(u8, usize)>,
+    ) -> Result<(), Diagnostic> {
         let good = match t {
             TypeRef::Int => matches!(v, Value::Int(_)),
             TypeRef::Float => matches!(v, Value::Float(_)),
@@ -3303,14 +3695,59 @@ impl<'a> Evaluator<'a> {
             TypeRef::None => matches!(v, Value::None),
             TypeRef::List(item) => {
                 if let Value::List(values, _) = v {
-                    item.as_ref()
-                        .map(|t| {
-                            values
-                                .borrow()
-                                .iter()
-                                .all(|v| self.ensure_type(v, t, span).is_ok())
-                        })
-                        .unwrap_or(true)
+                    let identity = (0, Rc::as_ptr(values) as usize);
+                    if !active.insert(identity) {
+                        true
+                    } else {
+                        let good = item
+                            .as_ref()
+                            .map(|t| {
+                                values
+                                    .borrow()
+                                    .iter()
+                                    .all(|v| self.ensure_type_inner(v, t, span, active).is_ok())
+                            })
+                            .unwrap_or(true);
+                        active.remove(&identity);
+                        good
+                    }
+                } else {
+                    false
+                }
+            }
+            TypeRef::Dictionary(types) => {
+                if let Value::Dictionary(dictionary, _) = v {
+                    if let Some((key_type, value_type)) = types {
+                        let identity = (1, Rc::as_ptr(dictionary) as usize);
+                        if !active.insert(identity) {
+                            true
+                        } else {
+                            let good = {
+                                let dictionary = dictionary.borrow();
+                                dictionary.entries.iter().all(|entry| {
+                                    self.ensure_type_inner(&entry.key, key_type, span, active)
+                                        .is_ok()
+                                        && self
+                                            .ensure_type_inner(
+                                                &entry.value,
+                                                value_type,
+                                                span,
+                                                active,
+                                            )
+                                            .is_ok()
+                                })
+                            };
+                            active.remove(&identity);
+                            if good {
+                                let mut dictionary = dictionary.borrow_mut();
+                                dictionary.key_type = Some((**key_type).clone());
+                                dictionary.value_type = Some((**value_type).clone());
+                            }
+                            good
+                        }
+                    } else {
+                        true
+                    }
                 } else {
                     false
                 }
@@ -3492,6 +3929,15 @@ impl<'a> Evaluator<'a> {
             "Use an index between 0 and length - 1.",
         )
     }
+    fn key_error(&self, span: Span, key: &Value) -> Diagnostic {
+        self.error(
+            "Key Error",
+            format!("Dictionary has no key {}", dictionary_key_display(key)),
+            span,
+            "Indexing a Dictionary requires an existing key.",
+            "Use have() or get() when the key may be absent.",
+        )
+    }
     fn zero(&self, s: Span) -> Diagnostic {
         self.error(
             "Math Error",
@@ -3519,6 +3965,21 @@ fn default_value(t: Option<&TypeRef>) -> Value {
         Some(TypeRef::String) => Value::String(String::new()),
         Some(TypeRef::Bool) => Value::Bool(false),
         Some(TypeRef::List(_)) => Value::List(Rc::new(RefCell::new(vec![])), false),
+        Some(TypeRef::Dictionary(types)) => {
+            let (key_type, value_type) = types
+                .as_ref()
+                .map(|(key, value)| (Some((**key).clone()), Some((**value).clone())))
+                .unwrap_or((None, None));
+            Value::Dictionary(
+                Rc::new(RefCell::new(DictionaryValue {
+                    entries: vec![],
+                    index: HashMap::default(),
+                    key_type,
+                    value_type,
+                })),
+                false,
+            )
+        }
         _ => Value::None,
     }
 }
@@ -3532,6 +3993,12 @@ fn type_ref_name(t: &TypeRef) -> String {
         TypeRef::None => "None".into(),
         TypeRef::List(None) => "List".into(),
         TypeRef::List(Some(x)) => format!("List[{}]", type_ref_name(x)),
+        TypeRef::Dictionary(None) => "Dictionary".into(),
+        TypeRef::Dictionary(Some((key, value))) => format!(
+            "Dictionary[{}, {}]",
+            type_ref_name(key),
+            type_ref_name(value)
+        ),
     }
 }
 fn numbers(a: Value, b: Value, s: Span, e: &Evaluator) -> Result<(f64, f64), Diagnostic> {
@@ -3631,11 +4098,44 @@ fn scalar_key(value: &Value) -> Option<ScalarKey> {
         }
         Value::String(value) => ScalarKey::String(value.clone()),
         Value::List(..)
+        | Value::Dictionary(..)
         | Value::Range(..)
         | Value::Function(..)
         | Value::Class(..)
         | Value::Instance(..) => return None,
     })
+}
+
+fn dictionary_key(
+    value: &Value,
+    span: Span,
+    evaluator: &Evaluator,
+) -> Result<ScalarKey, Diagnostic> {
+    if matches!(value, Value::Float(value) if value.is_nan()) {
+        return Err(evaluator.error(
+            "Key Error",
+            "NAN cannot be used as a Dictionary key",
+            span,
+            "NAN is not equal to itself and cannot identify one entry.",
+            "Use a finite Float, Int, Bool, String, or none key.",
+        ));
+    }
+    scalar_key(value).ok_or_else(|| {
+        evaluator.error(
+            "Type Error",
+            format!("{} cannot be used as a Dictionary key", value.type_name()),
+            span,
+            "Dictionary keys must be scalar values.",
+            "Use a String, Int, Float, Bool, or none key.",
+        )
+    })
+}
+
+fn dictionary_key_display(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("\"{value}\""),
+        value => value.to_string(),
+    }
 }
 
 fn compare_int_float_exact(integer: i64, float: f64) -> Option<Ordering> {
@@ -3750,6 +4250,18 @@ fn list_would_cycle(target: &Rc<RefCell<Vec<Value>>>, value: &Value) -> bool {
                     pending.extend(instance.borrow().fields.values().cloned());
                 }
             }
+            Value::Dictionary(dictionary, _) => {
+                let pointer = Rc::as_ptr(&dictionary) as usize;
+                if seen.insert((2, pointer)) {
+                    pending.extend(
+                        dictionary
+                            .borrow()
+                            .entries
+                            .iter()
+                            .map(|entry| entry.value.clone()),
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -3775,6 +4287,18 @@ fn value_reaches_instance(target: &Rc<RefCell<InstanceValue>>, value: &Value) ->
                 }
                 if seen.insert((1, pointer)) {
                     pending.extend(instance.borrow().fields.values().cloned());
+                }
+            }
+            Value::Dictionary(dictionary, _) => {
+                let pointer = Rc::as_ptr(&dictionary) as usize;
+                if seen.insert((2, pointer)) {
+                    pending.extend(
+                        dictionary
+                            .borrow()
+                            .entries
+                            .iter()
+                            .map(|entry| entry.value.clone()),
+                    );
                 }
             }
             _ => {}

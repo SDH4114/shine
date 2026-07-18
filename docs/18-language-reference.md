@@ -5,7 +5,7 @@
 - имя: Shine;
 - расширение: `.shn`;
 - CLI: `shine`;
-- версия документации: 0.1.3;
+- версия документации: 0.2.0;
 - реализация: Rust stable;
 - backend: tree-walking evaluator.
 
@@ -46,10 +46,13 @@ List[Number]
 List[String]
 List[Bool]
 List[List[Int]]
+Dictionary
+Dictionary[String, Float]
+Dictionary[Int, List[String]]
 None
 ```
 
-Вложенные `List[...]` parser принимает рекурсивно.
+Вложенные `List[...]` и `Dictionary[Key, Value]` parser принимает рекурсивно. Ключ `Dictionary` должен быть скалярным типом.
 
 ## Литералы
 
@@ -63,6 +66,7 @@ None
 true / false        Bool
 none                None
 [a, b, c]           List
+{key: value}        Dictionary
 ```
 
 ## Инструкции
@@ -85,6 +89,7 @@ name *= expression
 name /= expression
 object.field = expression
 list[index] = expression
+dictionary[key] = expression
 [a, b] = expression
 ```
 
@@ -139,9 +144,10 @@ not  and  or  in
 ```shine
 function(arguments)
 list.method(arguments)
+dictionary.method(arguments)
 object.field
 object.method(arguments)
-value[index]
+value[index] // List, String или Dictionary
 value[start..end]
 value[..end]
 value[start..]
@@ -251,6 +257,23 @@ mode()
 variance()
 std()
 ```
+
+## Методы Dictionary
+
+```text
+have(key)
+get(key)
+get(key, default)
+remove(key)
+len()
+clear()
+copy()
+keys()
+values()
+items()
+```
+
+Цикл по `Dictionary` и оператор `in` работают с ключами. Полный контракт описан в [главе о словарях](23-dictionaries.md).
 
 ## Области видимости
 

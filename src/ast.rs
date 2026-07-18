@@ -41,6 +41,7 @@ pub enum TypeRef {
     String,
     Bool,
     List(Option<Box<TypeRef>>),
+    Dictionary(Option<(Box<TypeRef>, Box<TypeRef>)>),
     None,
 }
 
@@ -180,6 +181,7 @@ pub enum Expr {
     Float(f64, Span),
     String(String, Span),
     List(Vec<Expr>, Span),
+    Dictionary(Vec<(Expr, Expr)>, Span),
     Name(String, Span),
     Unary {
         op: UnaryOp,
@@ -235,6 +237,7 @@ impl Expr {
             | Self::Float(_, s)
             | Self::String(_, s)
             | Self::List(_, s)
+            | Self::Dictionary(_, s)
             | Self::Name(_, s) => *s,
             Self::Unary { span, .. }
             | Self::Binary { span, .. }

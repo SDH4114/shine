@@ -148,8 +148,10 @@ def main() -> None:
         build()
 
     rust_version = command_output(["rustc", "--version"]).split()[1]
+    shine_binary = ROOT / "target/release/shine"
+    shine_version = command_output([str(shine_binary), "version"]).removeprefix("Shine ")
     commands = {
-        "Shine 0.1.3": [str(ROOT / "target/release/shine"), "run", "benchmarks/benchmark.shn"],
+        f"Shine {shine_version}": [str(shine_binary), "run", "benchmarks/benchmark.shn"],
         f"Python {platform.python_version()}": [sys.executable, "benchmarks/benchmark.py"],
         f"Rust {rust_version} Release": [str(ROOT / "target/release/rust-benchmark")],
         "C++ Release": [str(ROOT / "target/release/cpp-benchmark")],

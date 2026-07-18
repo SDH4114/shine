@@ -2,6 +2,16 @@ use std::collections::HashMap;
 
 use crate::{ast::*, diagnostics::Diagnostic, lexer::Lexer, parser::Parser, token::Span};
 
+#[derive(PartialEq)]
+enum StaticDictionaryKey {
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    String(String),
+    Nan,
+}
+
 #[derive(Clone)]
 struct Symbol {
     ty: Option<TypeRef>,
@@ -162,6 +172,20 @@ impl<'a> Checker<'a> {
                     AssignTarget::Name(name, name_span) => {
                         let declaration = ty.is_some() || *constant;
                         if declaration {
+                            if let (
+                                Some(TypeRef::Dictionary(Some((expected_key, expected_value)))),
+                                Expr::Dictionary(entries, _),
+                            ) = (ty, value)
+                            {
+                                for (key, value) in entries {
+                                    if let Some(actual) = self.expr(key)? {
+                                        self.require_type(expected_key, &actual, key.span())?;
+                                    }
+                                    if let Some(actual) = self.expr(value)? {
+                                        self.require_type(expected_value, &actual, value.span())?;
+                                    }
+                                }
+                            }
                             if let (Some(expected), Some(actual)) = (ty, &value_type) {
                                 self.require_type(expected, actual, *span)?;
                             }
@@ -241,21 +265,41 @@ impl<'a> Checker<'a> {
                     AssignTarget::Index(object, index, target_span) => {
                         let object_type = self.expr(object)?;
                         let index_type = self.expr(index)?;
-                        if let Some(actual) = index_type {
-                            self.require_type(&TypeRef::Int, &actual, index.span())?;
-                        }
                         if let Expr::Name(name, _) = object.as_ref() {
                             if self.lookup(name).is_some_and(|s| s.constant) {
                                 return Err(self.const_error(name, *target_span));
                             }
                         }
                         if let Some(actual) = object_type {
-                            if let TypeRef::List(item) = actual {
-                                if let (Some(expected), Some(value_type)) = (item, &value_type) {
-                                    self.require_type(&expected, value_type, *target_span)?;
+                            match actual {
+                                TypeRef::List(item) => {
+                                    if let Some(actual) = index_type {
+                                        self.require_type(&TypeRef::Int, &actual, index.span())?;
+                                    }
+                                    if let (Some(expected), Some(value_type)) = (item, &value_type)
+                                    {
+                                        self.require_type(&expected, value_type, *target_span)?;
+                                    }
                                 }
-                            } else {
-                                return Err(self.type_error("List", &actual, *target_span));
+                                TypeRef::Dictionary(types) => {
+                                    if let Some((key, item)) = types {
+                                        if let Some(actual) = &index_type {
+                                            self.require_type(&key, actual, index.span())?;
+                                        }
+                                        if let Some(actual) = &value_type {
+                                            self.require_type(&item, actual, *target_span)?;
+                                        }
+                                    } else if let Some(actual) = &index_type {
+                                        self.require_dictionary_key(actual, index.span())?;
+                                    }
+                                }
+                                actual => {
+                                    return Err(self.type_error(
+                                        "List or Dictionary",
+                                        &actual,
+                                        *target_span,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -294,6 +338,8 @@ impl<'a> Checker<'a> {
                         let iterable_type = self.expr(iterable)?;
                         let item_type = match iterable_type {
                             Some(TypeRef::List(item)) => item.map(|x| *x),
+                            Some(TypeRef::Dictionary(Some((key, _)))) => Some(*key),
+                            Some(TypeRef::Dictionary(None)) => None,
                             Some(TypeRef::String) => Some(TypeRef::String),
                             _ => Some(TypeRef::Int),
                         };
@@ -394,6 +440,47 @@ impl<'a> Checker<'a> {
                     None
                 })))
             }
+            Expr::Dictionary(entries, _) => {
+                let mut key_types = Vec::with_capacity(entries.len());
+                let mut value_types = Vec::with_capacity(entries.len());
+                let mut literal_keys = vec![];
+                for (key, value) in entries {
+                    let key_span = key.span();
+                    let key_type = self.expr(key)?;
+                    if let Some(actual) = &key_type {
+                        self.require_dictionary_key(actual, key.span())?;
+                    }
+                    if let Some(key) = static_dictionary_key(key) {
+                        if matches!(key, StaticDictionaryKey::Nan) {
+                            return Err(self.error(
+                                "Key Error",
+                                "NAN cannot be used as a Dictionary key",
+                                key_span,
+                                "NAN is not equal to itself and cannot identify one entry.",
+                                "Use a finite Float, Int, Bool, String, or none key.",
+                            ));
+                        }
+                        if literal_keys.contains(&key) {
+                            return Err(self.error(
+                                "Key Error",
+                                "duplicate key in Dictionary literal",
+                                key_span,
+                                "A Dictionary literal may define each key only once.",
+                                "Remove the duplicate entry or use a different key.",
+                            ));
+                        }
+                        literal_keys.push(key);
+                    }
+                    key_types.push(key_type);
+                    value_types.push(self.expr(value)?);
+                }
+                let key = homogeneous_type(&key_types);
+                let value = homogeneous_type(&value_types);
+                Ok(Some(TypeRef::Dictionary(match (key, value) {
+                    (Some(key), Some(value)) => Some((Box::new(key), Box::new(value))),
+                    _ => None,
+                })))
+            }
             Expr::Unary { op, value, span } => {
                 let ty = self.expr(value)?;
                 if matches!(op, UnaryOp::Not) {
@@ -415,8 +502,21 @@ impl<'a> Checker<'a> {
                 let right_ty = self.expr(right)?;
                 use BinaryOp::*;
                 match op {
-                    Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual | And | Or
-                    | In => Ok(Some(TypeRef::Bool)),
+                    In => {
+                        if let Some(TypeRef::Dictionary(types)) = &right_ty {
+                            if let Some((expected, _)) = types {
+                                if let Some(actual) = &left_ty {
+                                    self.require_type(expected, actual, left.span())?;
+                                }
+                            } else if let Some(actual) = &left_ty {
+                                self.require_dictionary_key(actual, left.span())?;
+                            }
+                        }
+                        Ok(Some(TypeRef::Bool))
+                    }
+                    Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual | And | Or => {
+                        Ok(Some(TypeRef::Bool))
+                    }
                     Divide | Power => {
                         self.check_numeric_pair(left_ty.as_ref(), right_ty.as_ref(), *span)?;
                         Ok(Some(TypeRef::Float))
@@ -449,13 +549,36 @@ impl<'a> Checker<'a> {
                 span,
             } => {
                 let object_ty = self.expr(object)?;
-                if let Some(actual) = self.expr(index)? {
-                    self.require_type(&TypeRef::Int, &actual, index.span())?;
-                }
+                let index_ty = self.expr(index)?;
                 match object_ty {
-                    Some(TypeRef::List(item)) => Ok(item.map(|x| *x)),
-                    Some(TypeRef::String) => Ok(Some(TypeRef::String)),
-                    Some(actual) => Err(self.type_error("List or String", &actual, *span)),
+                    Some(TypeRef::List(item)) => {
+                        if let Some(actual) = index_ty {
+                            self.require_type(&TypeRef::Int, &actual, index.span())?;
+                        }
+                        Ok(item.map(|x| *x))
+                    }
+                    Some(TypeRef::String) => {
+                        if let Some(actual) = index_ty {
+                            self.require_type(&TypeRef::Int, &actual, index.span())?;
+                        }
+                        Ok(Some(TypeRef::String))
+                    }
+                    Some(TypeRef::Dictionary(types)) => {
+                        if let Some((key, value)) = types {
+                            if let Some(actual) = index_ty {
+                                self.require_type(&key, &actual, index.span())?;
+                            }
+                            Ok(Some(*value))
+                        } else {
+                            if let Some(actual) = index_ty {
+                                self.require_dictionary_key(&actual, index.span())?;
+                            }
+                            Ok(None)
+                        }
+                    }
+                    Some(actual) => {
+                        Err(self.type_error("List, String, or Dictionary", &actual, *span))
+                    }
                     None => Ok(None),
                 }
             }
@@ -530,18 +653,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|arg| self.expr(arg))
                     .collect::<Result<Vec<_>, _>>()?;
-                if object_ty.is_none() {
+                let Some(object_ty) = object_ty else {
                     return Ok(None);
-                }
-                if name == "add" {
-                    if let Some(TypeRef::List(Some(item))) = &object_ty {
-                        for (argument, actual) in args.iter().zip(argument_types.iter()) {
-                            if let Some(actual) = actual {
-                                self.require_type(item, actual, argument.span())?;
-                            }
-                        }
-                    }
-                }
+                };
                 if let Expr::Name(object_name, _) = object.as_ref() {
                     if is_mutating_method(name)
                         && self.lookup(object_name).is_some_and(|s| s.constant)
@@ -549,38 +663,98 @@ impl<'a> Checker<'a> {
                         return Err(self.const_error(object_name, *span));
                     }
                 }
-                if let Some(actual) = &object_ty {
-                    if !matches!(actual, TypeRef::List(_)) {
-                        return Err(self.type_error("List", actual, *span));
+                match &object_ty {
+                    TypeRef::List(item) => {
+                        if name == "add" {
+                            if let Some(item) = item {
+                                for (argument, actual) in args.iter().zip(argument_types.iter()) {
+                                    if let Some(actual) = actual {
+                                        self.require_type(item, actual, argument.span())?;
+                                    }
+                                }
+                            }
+                        }
+                        let numeric_item = item.as_ref().and_then(|item| {
+                            matches!(item.as_ref(), TypeRef::Int | TypeRef::Float)
+                                .then(|| item.as_ref().clone())
+                        });
+                        Ok(match name.as_str() {
+                            "have" | "remove" => Some(TypeRef::Bool),
+                            "index" => None,
+                            "len" => Some(TypeRef::Int),
+                            "copy" | "unique" => Some(object_ty),
+                            "sum" | "product" | "min" | "max" => {
+                                numeric_item.or(Some(TypeRef::Number))
+                            }
+                            "mean" | "median" | "mode" | "variance" | "std" => Some(TypeRef::Float),
+                            "add" | "clear" | "reverse" | "sort" => Some(TypeRef::None),
+                            "del" => None,
+                            _ => {
+                                return Err(self.error(
+                                    "Name Error",
+                                    format!("List has no method `{name}`"),
+                                    *span,
+                                    "The requested list method does not exist.",
+                                    "Check the list method name.",
+                                ))
+                            }
+                        })
                     }
+                    TypeRef::Dictionary(types) => {
+                        let (minimum, maximum) = match name.as_str() {
+                            "have" | "remove" => (1, 1),
+                            "get" => (1, 2),
+                            "len" | "clear" | "copy" | "keys" | "values" | "items" => (0, 0),
+                            _ => return Err(self.error(
+                                "Name Error",
+                                format!("Dictionary has no method `{name}`"),
+                                *span,
+                                "The requested Dictionary method does not exist.",
+                                "Use have, get, remove, len, clear, copy, keys, values, or items.",
+                            )),
+                        };
+                        if args.len() < minimum || args.len() > maximum {
+                            return Err(self.error(
+                                "Argument Error",
+                                format!(
+                                    "{name} expects {} argument(s), received {}",
+                                    if minimum == maximum {
+                                        minimum.to_string()
+                                    } else {
+                                        format!("{minimum} or {maximum}")
+                                    },
+                                    args.len()
+                                ),
+                                *span,
+                                "The Dictionary method has the wrong number of arguments.",
+                                "Adjust the arguments to match the method.",
+                            ));
+                        }
+                        if let Some(actual) = argument_types.first().and_then(Option::as_ref) {
+                            if let Some((key, _)) = types {
+                                self.require_type(key, actual, args[0].span())?;
+                            } else {
+                                self.require_dictionary_key(actual, args[0].span())?;
+                            }
+                        }
+                        let (key_type, value_type) = match types {
+                            Some((key, value)) => (Some((**key).clone()), Some((**value).clone())),
+                            None => (None, None),
+                        };
+                        Ok(match name.as_str() {
+                            "have" | "remove" => Some(TypeRef::Bool),
+                            "get" => None,
+                            "len" => Some(TypeRef::Int),
+                            "clear" => Some(TypeRef::None),
+                            "copy" => Some(object_ty),
+                            "keys" => Some(TypeRef::List(key_type.map(Box::new))),
+                            "values" => Some(TypeRef::List(value_type.map(Box::new))),
+                            "items" => Some(TypeRef::List(None)),
+                            _ => unreachable!(),
+                        })
+                    }
+                    actual => Err(self.type_error("List or Dictionary", actual, *span)),
                 }
-                let numeric_item = match &object_ty {
-                    Some(TypeRef::List(Some(item)))
-                        if matches!(item.as_ref(), TypeRef::Int | TypeRef::Float) =>
-                    {
-                        Some(item.as_ref().clone())
-                    }
-                    _ => None,
-                };
-                Ok(match name.as_str() {
-                    "have" | "remove" => Some(TypeRef::Bool),
-                    "index" => None,
-                    "len" => Some(TypeRef::Int),
-                    "copy" | "unique" => object_ty,
-                    "sum" | "product" | "min" | "max" => numeric_item.or(Some(TypeRef::Number)),
-                    "mean" | "median" | "mode" | "variance" | "std" => Some(TypeRef::Float),
-                    "add" | "clear" | "reverse" | "sort" => Some(TypeRef::None),
-                    "del" => None,
-                    _ => {
-                        return Err(self.error(
-                            "Name Error",
-                            format!("List has no method `{name}`"),
-                            *span,
-                            "The requested list method does not exist.",
-                            "Check the list method name.",
-                        ))
-                    }
-                })
             }
             Expr::Member { object, .. } => {
                 self.expr(object)?;
@@ -725,6 +899,27 @@ impl<'a> Checker<'a> {
             Err(self.type_error("Number", actual, span))
         }
     }
+    fn require_dictionary_key(&self, actual: &TypeRef, span: Span) -> Result<(), Diagnostic> {
+        if matches!(
+            actual,
+            TypeRef::String
+                | TypeRef::Int
+                | TypeRef::Float
+                | TypeRef::Number
+                | TypeRef::Bool
+                | TypeRef::None
+        ) {
+            Ok(())
+        } else {
+            Err(self.error(
+                "Type Error",
+                format!("{} cannot be used as a Dictionary key", type_name(actual)),
+                span,
+                "Dictionary keys must be scalar values.",
+                "Use a String, Int, Float, Bool, or none key.",
+            ))
+        }
+    }
     fn require_type(
         &self,
         expected: &TypeRef,
@@ -813,6 +1008,12 @@ fn compatible(expected: &TypeRef, actual: &TypeRef) -> bool {
         (TypeRef::List(None), TypeRef::List(_)) => true,
         (TypeRef::List(Some(_)), TypeRef::List(None)) => true,
         (TypeRef::List(Some(a)), TypeRef::List(Some(b))) => compatible(a, b),
+        (TypeRef::Dictionary(None), TypeRef::Dictionary(_)) => true,
+        (TypeRef::Dictionary(Some(_)), TypeRef::Dictionary(None)) => true,
+        (
+            TypeRef::Dictionary(Some((expected_key, expected_value))),
+            TypeRef::Dictionary(Some((actual_key, actual_value))),
+        ) => compatible(expected_key, actual_key) && compatible(expected_value, actual_value),
         (a, b) => a == b,
     }
 }
@@ -853,8 +1054,61 @@ fn type_name(ty: &TypeRef) -> String {
         TypeRef::None => "None".into(),
         TypeRef::List(None) => "List".into(),
         TypeRef::List(Some(item)) => format!("List[{}]", type_name(item)),
+        TypeRef::Dictionary(None) => "Dictionary".into(),
+        TypeRef::Dictionary(Some((key, value))) => {
+            format!("Dictionary[{}, {}]", type_name(key), type_name(value))
+        }
     }
 }
+
+fn homogeneous_type(types: &[Option<TypeRef>]) -> Option<TypeRef> {
+    let first = types.first()?.clone()?;
+    types
+        .iter()
+        .all(|ty| ty.as_ref().is_some_and(|ty| compatible(&first, ty)))
+        .then_some(first)
+}
+
+fn static_dictionary_key(expression: &Expr) -> Option<StaticDictionaryKey> {
+    match expression {
+        Expr::None(_) => Some(StaticDictionaryKey::None),
+        Expr::Bool(value, _) => Some(StaticDictionaryKey::Bool(*value)),
+        Expr::Int(value, _) => Some(StaticDictionaryKey::Int(*value)),
+        Expr::Float(value, _) => Some(normalize_static_float(*value)),
+        Expr::String(value, _) => Some(StaticDictionaryKey::String(value.clone())),
+        Expr::Name(name, _) if name == "NAN" => Some(StaticDictionaryKey::Nan),
+        Expr::Unary {
+            op: UnaryOp::Positive,
+            value,
+            ..
+        } => static_dictionary_key(value),
+        Expr::Unary {
+            op: UnaryOp::Negate,
+            value,
+            ..
+        } => match value.as_ref() {
+            Expr::Int(value, _) => value.checked_neg().map(StaticDictionaryKey::Int),
+            Expr::Float(value, _) => Some(normalize_static_float(-value)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn normalize_static_float(value: f64) -> StaticDictionaryKey {
+    if value.is_nan() {
+        return StaticDictionaryKey::Nan;
+    }
+    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if value >= i64::MIN as f64 && value < I64_UPPER_EXCLUSIVE && value.fract() == 0.0 {
+        let integer = value as i64;
+        if integer as f64 == value {
+            return StaticDictionaryKey::Int(integer);
+        }
+    }
+    StaticDictionaryKey::Float(value.to_bits())
+}
+
 fn is_mutating_method(name: &str) -> bool {
     matches!(
         name,

@@ -1567,4 +1567,20 @@ fn invalid(): Int {
         };
         assert!(compile_function(params, body, &environment).is_none());
     }
+
+    #[test]
+    fn dictionaries_use_the_reference_evaluator_fallback() {
+        let source = r#"
+fn lookup(): Int {
+    values: Dictionary[String, Int] = {"answer": 42}
+    return values["answer"]
+}
+"#;
+        let program = crate::parse(source, "dictionary-fallback-test.shn").unwrap();
+        let environment = collect_environment(&program);
+        let Stmt::Function { params, body, .. } = &program.statements[0] else {
+            panic!("expected a function")
+        };
+        assert!(compile_function(params, body, &environment).is_none());
+    }
 }

@@ -406,14 +406,47 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            return matches!(
+            if matches!(
                 self.peek_n(i).kind,
                 TokenKind::Equal
                     | TokenKind::PlusEqual
                     | TokenKind::MinusEqual
                     | TokenKind::StarEqual
                     | TokenKind::SlashEqual
-            ) || self.peek_n(i).kind.same_variant(&TokenKind::LeftBracket);
+            ) {
+                return true;
+            }
+            if self.peek_n(i).kind.same_variant(&TokenKind::LeftBracket) {
+                let mut depth = 0usize;
+                let mut offset = i;
+                while offset < i + 64 {
+                    if self
+                        .peek_n(offset)
+                        .kind
+                        .same_variant(&TokenKind::LeftBracket)
+                    {
+                        depth += 1;
+                    } else if self
+                        .peek_n(offset)
+                        .kind
+                        .same_variant(&TokenKind::RightBracket)
+                    {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return matches!(
+                                self.peek_n(offset + 1).kind,
+                                TokenKind::Equal
+                                    | TokenKind::PlusEqual
+                                    | TokenKind::MinusEqual
+                                    | TokenKind::StarEqual
+                                    | TokenKind::SlashEqual
+                            );
+                        }
+                    }
+                    offset += 1;
+                }
+            }
+            return false;
         }
         if self.peek().kind.same_variant(&TokenKind::LeftBracket) {
             let mut i = 1;
@@ -533,10 +566,44 @@ impl<'a> Parser<'a> {
                 };
                 Ok(TypeRef::List(item))
             }
+            "Dictionary" => {
+                let types = if self.take(&TokenKind::LeftBracket).is_some() {
+                    let key = self.type_ref()?;
+                    if !matches!(
+                        &key,
+                        TypeRef::String
+                            | TypeRef::Int
+                            | TypeRef::Float
+                            | TypeRef::Number
+                            | TypeRef::Bool
+                            | TypeRef::None
+                    ) {
+                        return Err(self.error(
+                            span,
+                            "Dictionary key type must be scalar",
+                            "Only String, Int, Float, Number, Bool, and None can be Dictionary keys.",
+                            "Choose a supported scalar key type.",
+                        ));
+                    }
+                    self.expect(
+                        &TokenKind::Comma,
+                        "expected `,` between Dictionary key and value types",
+                    )?;
+                    let value = self.type_ref()?;
+                    self.expect(
+                        &TokenKind::RightBracket,
+                        "expected `]` after Dictionary types",
+                    )?;
+                    Some((Box::new(key), Box::new(value)))
+                } else {
+                    None
+                };
+                Ok(TypeRef::Dictionary(types))
+            }
             _ => Err(self.error(
                 span,
                 format!("unknown type `{name}`"),
-                "Shine supports Int, Float, Number, String, Bool, List, and None.",
+                "Shine supports Int, Float, Number, String, Bool, List, Dictionary, and None.",
                 "Use a built-in type name.",
             )),
         }
@@ -788,10 +855,36 @@ impl<'a> Parser<'a> {
                 let close = self.expect(&TokenKind::RightBracket, "expected `]`")?.span;
                 Ok(Expr::List(items, t.span.merge(close)))
             }
+            TokenKind::LeftBrace => {
+                let mut entries = vec![];
+                self.separators();
+                while !self.at(&TokenKind::RightBrace) {
+                    let key = self.expression()?;
+                    self.expect(&TokenKind::Colon, "expected `:` after Dictionary key")?;
+                    let value = self.expression()?;
+                    entries.push((key, value));
+
+                    if self.take(&TokenKind::Comma).is_some()
+                        || self.at(&TokenKind::Newline)
+                        || self.at(&TokenKind::Semicolon)
+                    {
+                        self.separators();
+                    } else {
+                        break;
+                    }
+                }
+                let close = self
+                    .expect(
+                        &TokenKind::RightBrace,
+                        "expected `}` after Dictionary literal",
+                    )?
+                    .span;
+                Ok(Expr::Dictionary(entries, t.span.merge(close)))
+            }
             _ => Err(self.error(
                 t.span,
                 "expected an expression",
-                "A value, variable, list, or function call was expected here.",
+                "A value, variable, List, Dictionary, or function call was expected here.",
                 "Add a valid expression.",
             )),
         }

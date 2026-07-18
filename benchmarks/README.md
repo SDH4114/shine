@@ -30,7 +30,7 @@ The runner reports best, median, mean, relative wall time, and peak RSS where `/
 
 ## Interpretation
 
-Shine 0.1.3 uses a compact numeric VM for scalar arithmetic, comparisons, branches, loops, helper calls, and homogeneous numeric lists, with the tree-walking evaluator as the general fallback. Rust is compiled by `rustc` with `opt-level=3` and one codegen unit, C++ is compiled with `-O3 -DNDEBUG`, C# uses the .NET 10 Release JIT, and Python uses the installed CPython interpreter. Therefore this measures current end-to-end runtimes, not the planned Shine LLVM AOT backend. Run on an idle machine, keep it connected to power, close heavy applications, and compare medians rather than one result.
+Shine 0.2.0 uses a compact numeric VM for scalar arithmetic, comparisons, branches, loops, helper calls, and homogeneous numeric lists, with the tree-walking evaluator as the general fallback. Dictionary workloads intentionally use that reference fallback. Rust is compiled by `rustc` with `opt-level=3` and one codegen unit, C++ is compiled with `-O3 -DNDEBUG`, C# uses the .NET 10 Release JIT, and Python uses the installed CPython interpreter. Therefore this measures current end-to-end runtimes, not the planned Shine LLVM AOT backend. Run on an idle machine, keep it connected to power, close heavy applications, and compare medians rather than one result.
 
 The separate general-runtime stress program covers branch-heavy `loop` conditions, nested Euclidean-algorithm loops, comparisons, and integer remainder operations. It has fixed checksums and is useful for catching a fallback to slow tree walking:
 

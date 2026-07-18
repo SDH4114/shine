@@ -1,6 +1,6 @@
 # Shine
 
-Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.1.3 includes modules, HIR linking, broad built-in mathematics, inferred constants, and a simple Python-like object model. The runtime keeps the tree-walking evaluator as its semantic fallback and automatically uses a compact numeric VM for scalar arithmetic, comparisons, branches, all loop forms, helper-function calls, and typed `Int`/`Float` list workloads.
+Shine is a readable programming language growing toward native scientific, data, ML, CLI, and server applications. Programs use the `.shn` extension. Version 0.2.0 adds ordered, typed Dictionaries to the modules, HIR, checker, evaluator, formatter, and editor grammar already present in 0.1.x. The runtime keeps the tree-walking evaluator as its semantic fallback and automatically uses a compact numeric VM for supported scalar arithmetic, comparisons, branches, loop forms, helper-function calls, and typed `Int`/`Float` list workloads.
 
 Полная русскоязычная документация: [docs/README.md](docs/README.md).
 
@@ -130,6 +130,17 @@ unique  reverse  sort  sum  product  min  max
 mean  median  mode  variance  std
 ```
 
+Dictionaries preserve insertion order, accept scalar keys, and can be optionally typed:
+
+```shine
+user = {"name": "Amin", "age": 25}
+scores: Dictionary[String, Float] = {"math": 95.5}
+user["active"] = true
+print(user.get("name", "unknown"))
+```
+
+Dictionary methods are `have`, `get`, `remove`, `len`, `clear`, `copy`, `keys`, `values`, and `items`. See the [Dictionary guide](docs/23-dictionaries.md).
+
 Math functions such as `sqrt`, `sin`, `log`, `round`, `min`, `max`, and `sum` are available without imports, as are `PI`, `TAU`, `E`, `PHI`, `INF`, and `NAN`. Console and text-file built-ins include `print`, `input`, `readFile`, and `writeFile`.
 
 Important everyday mathematics and statistics are always available without imports, including exponentials, trigonometry, hyperbolic functions, angle conversion, `gcd`, `lcm`, `factorial`, `mean`, `median`, `mode`, `variance`, and `std`. Advanced domains remain official scientific packages.
@@ -189,6 +200,6 @@ The repository includes checksum-validated equivalent workloads for Shine, Pytho
 python3 benchmarks/run_benchmarks.py
 ```
 
-See [benchmarks/README.md](benchmarks/README.md) for methodology and interpretation. Current results measure the tree-walking Shine runtime, not the planned LLVM AOT backend.
+See [benchmarks/README.md](benchmarks/README.md) for methodology and interpretation. Current results measure the numeric VM plus tree-walking fallback, not the planned LLVM AOT backend.
 
 The current implementation still excludes Web, GUI, async, package management, scientific arrays, inheritance, and LLVM code generation. Their architecture is documented in [shine-master-specification.md](shine-master-specification.md); roadmap items are not presented as implemented features.

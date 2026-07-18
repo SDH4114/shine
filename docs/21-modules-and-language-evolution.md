@@ -60,6 +60,8 @@ entry source
 
 Имена каждого dependency module изолируются во внутреннем namespace. Entry-module сохраняет пользовательские имена. Imports не превращают private declarations в глобальные names.
 
+В Shine 0.2 литералы и типы `Dictionary` проходят через тот же module graph и HIR. Словарь можно создавать и возвращать в dependency-модуле, а затем индексировать в entry-модуле без потери типов и source diagnostics.
+
 ## Зафиксированный синтаксис следующих этапов
 
 Простая реализованная форма класса:

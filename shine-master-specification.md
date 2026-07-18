@@ -9,7 +9,7 @@ This is the self-contained source of truth for Shine. Give it to an AI or develo
 - Name: Shine
 - Extension: .shn
 - implementation language: Rust
-- current release line: 0.1.3 modules, built-in mathematics, inferred constants, and simple classes
+- current release line: 0.2.0 ordered and typed Dictionary, modules, built-in mathematics, inferred constants, and simple classes
 - long-term focus: native scientific computing, data, ML, CLI, and servers
 - production backend direction: LLVM native AOT, without a production bytecode VM
 
@@ -21,7 +21,7 @@ Principles: simplicity over feature count; readable code for beginners; curly-br
 
 Required: numbers, strings, booleans, none, lists, dynamic variables, fixed-type variables, constants, expressions, functions, return, if/else, one loop construct, ranges, step, list indexing and slicing, list methods, destructuring, console I/O, mathematics, conversions, text files, diagnostics, and CLI commands new/run/check/build/fmt/test.
 
-Not implemented in 0.1.3: inheritance, async, package registry, LLVM code generation, scientific Array/DataFrame/Tensor, notebook, server runtime, WebAssembly, browser, GUI, or full LSP. These are roadmap layers, not current claims.
+Not implemented in 0.2.0: inheritance, async, package registry, LLVM code generation, scientific Array/DataFrame/Tensor, notebook, server runtime, WebAssembly, browser, GUI, or full LSP. These are roadmap layers, not current claims.
 
 ## Shine 1.0 architecture contract
 
@@ -93,11 +93,12 @@ const numbers = [1, 2, 3]
 numbers.add(4) // error
 ~~~
 
-Built-in types: Int, Float, Number, String, Bool, List, None. Number accepts Int and Float. List annotations are supported:
+Built-in types: Int, Float, Number, String, Bool, List, Dictionary, None. Number accepts Int and Float. List and Dictionary annotations are supported:
 
 ~~~shine
 names: List[String] = []
 values: List[Float] = [1.0, 2.5]
+scores: Dictionary[String, Float] = {"math": 95.5}
 ~~~
 
 Dynamic lists may contain different values. There are no mandatory Tuple or Set types: use lists, const, destructuring, and unique.
@@ -275,6 +276,20 @@ fn minMax(numbers) {
 
 [minimum, maximum] = minMax([4, 8, 2, 10])
 ~~~
+
+## Dictionary
+
+Dictionary literals preserve insertion order and may be dynamic or typed:
+
+~~~shine
+user = {"name": "Amin", "age": 25}
+scores: Dictionary[String, Float] = {"math": 95.5}
+user["active"] = true
+~~~
+
+Keys are String, Int, Float, Bool, or none. Numerically equal Int and Float keys are identical, including `1` and `1.0`; positive and negative floating zero are identical. NAN is not a valid key. A repeated key in one literal is a Key Error. Indexing a missing key is a Key Error; `get(key)` returns none and `get(key, default)` returns the default.
+
+Required methods: `have`, `get`, `remove`, `len`, `clear`, `copy`, `keys`, `values`, and `items`. Iteration yields keys and `key in dictionary` checks membership. `items()` yields a List of two-item Lists. Equality ignores key order. A const Dictionary is deeply immutable. Display, equality, and const freezing must terminate safely for cyclic Dictionary graphs.
 
 ## Mathematics and science
 
@@ -544,7 +559,7 @@ The MVP is ready when:
 
 ## Future roadmap
 
-OOP and visibility; typed errors; LLVM native AOT; async/server runtime; Array CPU/CUDA/Metal; Arrow DataFrame; science/ML packages; package manager; LSP; debugger; notebook; WebAssembly and other platforms after 1.0 foundations.
+The accepted release order is 0.2 Dictionary; 0.3 semantic resolution, generics, traits, typed errors and pattern matching; 0.4 manifests, packages, standard library and AST formatting; 0.5 typed MIR/SSA, tracing GC, LLVM native AOT and FFI; 0.6 structured concurrency; 0.7 Array/Arrow DataFrame and CPU/Metal/CUDA scientific execution; 0.8 Tensor/autograd and ML; 0.9 tooling, security, fuzzing and compatibility stabilization; then 1.0. The complete contractual checklist is maintained in `docs/24-roadmap-to-1.0.md`.
 
 Future features must preserve the simple core.
 

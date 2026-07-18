@@ -385,6 +385,13 @@ impl Renamer<'_> {
                     .collect::<Result<_, _>>()?,
                 span,
             ),
+            Expr::Dictionary(entries, span) => Expr::Dictionary(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| Ok((self.expression(key)?, self.expression(value)?)))
+                    .collect::<Result<_, Diagnostic>>()?,
+                span,
+            ),
             Expr::Unary { op, value, span } => Expr::Unary {
                 op,
                 value: Box::new(self.expression(*value)?),

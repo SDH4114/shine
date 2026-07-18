@@ -1,0 +1,15 @@
+fn main() {
+    user = {
+        "name": "Amin"
+        "age": 25
+    }
+    user["active"] = true
+
+    assert(user["name"] == "Amin")
+    assert(user.get("missing", "unknown") == "unknown")
+    assert(user.keys() == ["name", "age", "active"])
+
+    loop key in user {
+        print("{key}: {user[key]}")
+    }
+}

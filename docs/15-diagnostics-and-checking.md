@@ -116,6 +116,17 @@ values = [1, 2]
 print(values[10])
 ```
 
+### Key Error
+
+Отсутствующий, повторный или равный `NAN` ключ `Dictionary`:
+
+```shine
+user = {"name": "Amin"}
+print(user["missing"])
+```
+
+Если отсутствие допустимо, используйте `get(key)` или `get(key, default)`.
+
 ### Math Error
 
 Деление на ноль или значение вне математического домена:

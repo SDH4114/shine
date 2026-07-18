@@ -69,6 +69,147 @@ fn typed_lists_enforce_mutated_elements() {
 }
 
 #[test]
+fn dictionary_contract_checks_and_runs() {
+    let source = r#"
+fn main() {
+    empty = {}
+    assert(empty.len() == 0)
+
+    user = {
+        "name": "Amin"
+        "age": 25
+    }
+    user["active"] = true
+    user["name"] = "Amin Mammadov"
+    assert(user.keys() == ["name", "age", "active"])
+    assert(user.values() == ["Amin Mammadov", 25, true])
+    assert(user.items() == [["name", "Amin Mammadov"], ["age", 25], ["active", true]])
+    assert(user["name"] == "Amin Mammadov")
+    assert(user.have("active"))
+    assert("active" in user)
+    assert(user.get("missing") == none)
+    assert(user.get("missing", 42) == 42)
+
+    keys = []
+    loop key in user { keys.add(key) }
+    assert(keys == ["name", "age", "active"])
+
+    copied = user.copy()
+    copied["extra"] = "independent"
+    assert(copied.len() == 4)
+    assert(user.len() == 3)
+    assert(copied.remove("age"))
+    assert(copied.keys() == ["name", "active", "extra"])
+    copied.clear()
+    assert(copied == {})
+
+    numbers = {1: "one", -0.0: "zero", 2.5: "fraction", true: "bool", none: "none"}
+    assert(numbers[1.0] == "one")
+    assert(numbers[0] == "zero")
+    assert(numbers[2.5] == "fraction")
+    assert(numbers[true] == "bool")
+    assert(numbers[none] == "none")
+
+    left = {"a": 1, "b": {"nested": [1, 2]}}
+    right = {"b": {"nested": [1, 2]}, "a": 1}
+    assert(left == right)
+
+    scores: Dictionary[String, Float] = {"math": 95.5}
+    scores["science"] = 91.0
+    assert(scores["science"] == 91.0)
+    dynamic: Dictionary = {"anything": [1, "two"]}
+    assert(dynamic.len() == 1)
+    assert(string(user) == "{{\"name\": \"Amin Mammadov\", \"age\": 25, \"active\": true}}")
+    assert("User: {user}" == "User: {{\"name\": \"Amin Mammadov\", \"age\": 25, \"active\": true}}")
+}
+"#;
+    check_source(source, "dictionary.shn").unwrap();
+    run_source(source, "dictionary.shn").unwrap();
+}
+
+#[test]
+fn dictionary_reports_key_and_type_errors() {
+    for source in [
+        "value = {1: \"int\", 1.0: \"float\"}\n",
+        "value = {0.0: \"zero\", -0.0: \"negative zero\"}\n",
+    ] {
+        let error = check_source(source, "duplicate-dictionary-key.shn").unwrap_err();
+        assert_eq!(error.category, "Key Error");
+        assert!(error.message.contains("duplicate"));
+    }
+
+    let nan = run_source("value = {NAN: 1}\n", "nan-dictionary-key.shn").unwrap_err();
+    assert_eq!(nan.category, "Key Error");
+    assert!(nan.message.contains("NAN"));
+
+    let invalid = run_source("value = {[1]: 2}\n", "invalid-dictionary-key.shn").unwrap_err();
+    assert_eq!(invalid.category, "Type Error");
+
+    let missing = run_source(
+        "value = {\"present\": 1}\nprint(value[\"missing\"])\n",
+        "missing-dictionary-key.shn",
+    )
+    .unwrap_err();
+    assert_eq!(missing.category, "Key Error");
+
+    let checker_value = check_source(
+        "scores: Dictionary[String, Float] = {\"math\": 95.5}\nscores[\"math\"] = 1\n",
+        "typed-dictionary.shn",
+    )
+    .unwrap_err();
+    assert_eq!(checker_value.category, "Type Error");
+    let checker_literal = check_source(
+        "scores: Dictionary[String, Float] = {\"math\": 95.5, \"label\": \"high\"}\n",
+        "typed-dictionary-literal.shn",
+    )
+    .unwrap_err();
+    assert_eq!(checker_literal.category, "Type Error");
+    let runtime_value = run_source(
+        "scores: Dictionary[String, Float] = {\"math\": 95.5}\nscores[\"math\"] = 1\n",
+        "typed-dictionary.shn",
+    )
+    .unwrap_err();
+    assert_eq!(runtime_value.category, "Type Error");
+
+    let runtime_key = run_source(
+        "scores: Dictionary[String, Float] = {}\nscores[1] = 1.0\n",
+        "typed-dictionary-key.shn",
+    )
+    .unwrap_err();
+    assert_eq!(runtime_key.category, "Type Error");
+}
+
+#[test]
+fn cyclic_and_const_dictionaries_are_safe() {
+    let source = r#"
+dictionary = {}
+dictionary["self"] = dictionary
+other = {}
+other["self"] = other
+assert(dictionary == other)
+assert(string(dictionary) == "{{\"self\": {{<cycle>}}}}")
+const frozen = dictionary
+assert(frozen == dictionary)
+assert(string(frozen) == "{{\"self\": {{<cycle>}}}}")
+"#;
+    run_source(source, "cyclic-dictionary.shn").unwrap();
+
+    let direct = run_source(
+        "const dictionary = {\"value\": 1}\ndictionary[\"value\"] = 2\n",
+        "const-dictionary.shn",
+    )
+    .unwrap_err();
+    assert_eq!(direct.category, "Const Error");
+
+    let deep = run_source(
+        "const dictionary = {\"nested\": {\"values\": [1]}}\ndictionary[\"nested\"][\"values\"].add(2)\n",
+        "deep-const-dictionary.shn",
+    )
+    .unwrap_err();
+    assert_eq!(deep.category, "Const Error");
+}
+
+#[test]
 fn check_does_not_execute_dynamic_functions() {
     let source = r#"
 fn divide(a, b) { return a / b }
@@ -242,7 +383,7 @@ fn formatter_preserves_multiline_string_contents() {
     let source = root.join("multiline.shn");
     fs::write(
         &source,
-        "fn main() {\ntext = \"\"\"\n  this is string content\n\"\"\"\nprint(text)\n}\n",
+        "fn main() {\ntext = \"\"\"\n  this is string content\n\"\"\"\nuser = {\n\"name\": \"Amin\"\n\"active\": true\n}\nprint(user[\"name\"])\n}\n",
     )
     .unwrap();
 
@@ -258,6 +399,7 @@ fn formatter_preserves_multiline_string_contents() {
     );
     let formatted = fs::read_to_string(&source).unwrap();
     assert!(formatted.contains("\n  this is string content\n"));
+    assert!(formatted.contains("    user = {\n        \"name\": \"Amin\"\n"));
     assert!(Command::new(shine)
         .args(["run", source.to_str().unwrap()])
         .status()
@@ -283,6 +425,7 @@ from labels import label
 fn main() {
     assert(numbers.double(4) == 8)
     assert(numbers.summary(4) == "result=8")
+    assert(numbers.profile()["name"] == "Shine")
     scale = numbers.Scale(3)
     assert(scale.apply(4) == 12)
     print(label())
@@ -292,7 +435,7 @@ fn main() {
     .unwrap();
     fs::write(
         src.join("math.shn"),
-        "const factor = 2\nexport fn double(value: Int): Int { return value * factor }\nexport fn summary(value: Int): String { return \"result={double(value)}\" }\nexport class Scale { factor = 1\nfn init(factor) { self.factor = factor }\nfn apply(value) { return value * self.factor }\n}\nfn hidden() { return 0 }\n",
+        "const factor = 2\nexport fn double(value: Int): Int { return value * factor }\nexport fn summary(value: Int): String { return \"result={double(value)}\" }\nexport fn profile(): Dictionary[String, String] { return {\"name\": \"Shine\"} }\nexport class Scale { factor = 1\nfn init(factor) { self.factor = factor }\nfn apply(value) { return value * self.factor }\n}\nfn hidden() { return 0 }\n",
     )
     .unwrap();
     fs::write(
